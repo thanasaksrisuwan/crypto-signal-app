@@ -1,0 +1,52 @@
+# ไฟล์และโฟลเดอร์ที่ไม่ต้องการเก็บใน Git
+
+# ไฟล์ตั้งค่าสภาพแวดล้อม
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ไฟล์ Python และแคช
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ไดเรกทอรีสำหรับสภาพแวดล้อมเสมือน
+venv/
+env/
+ENV/
+
+# ไฟล์ล็อก
+logs/
+*.log
+
+# โฟลเดอร์ Node.js
+frontend/node_modules/
+frontend/.pnp
+frontend/.pnp.js
+frontend/coverage/
+frontend/build/
+frontend/dist/
+
+# ไฟล์ชั่วคราวและไฟล์ระบบ
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# โฟลเดอร์ผลลัพธ์และข้อมูลที่โหลด
+backtest_results/
+downloads/
+data/
+
+# ไฟล์ระบบ Windows
+desktop.ini
+ehthumbs.db

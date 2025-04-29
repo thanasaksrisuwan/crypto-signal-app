@@ -1,0 +1,5 @@
+# https://www.robotstxt.org/robotstxt.html
+# ไฟล์นี้ใช้ควบคุมการเข้าถึงของเว็บครอวเลอร์
+
+User-agent: *
+Disallow:
