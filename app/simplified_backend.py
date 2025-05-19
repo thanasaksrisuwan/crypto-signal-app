@@ -18,16 +18,25 @@ API Endpoints:
 โดยเฉพาะอย่างยิ่งข้อผิดพลาด 403 ที่เกิดขึ้นเมื่อพยายามเชื่อมต่อกับ endpoint ที่ไม่มีอยู่
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List
 import asyncio
 import json
 import random
 from datetime import datetime
+import os
+import sys
+
+# นำเข้าโมดูลจัดการตัวแปรสภาพแวดล้อม
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+import env_manager as env
 import uvicorn
 
-# สัญลักษณ์คริปโตที่เราติดตาม
-SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+# สัญลักษณ์คริปโตที่เราติดตามจากตัวแปรสภาพแวดล้อม
+SYMBOLS = env.get_available_symbols()
 
 # ตั้งค่าแอพพลิเคชัน FastAPI
 app = FastAPI(
@@ -58,6 +67,131 @@ async def root():
 async def get_available_symbols():
     """ดึงรายการสัญลักษณ์ที่มีให้บริการ"""
     return {"symbols": SYMBOLS}
+
+# นำเข้า Pydantic models ที่ต้องใช้
+class SymbolRequest(BaseModel):
+    symbol: str
+
+class SymbolResponse(BaseModel):
+    success: bool
+    message: str
+    symbols: List[str]
+
+# API endpoints สำหรับจัดการสัญลักษณ์คริปโต
+@app.get("/api/symbols", response_model=SymbolResponse)
+async def get_symbols():
+    """
+    ดึงรายการสัญลักษณ์ที่รองรับทั้งหมด
+    
+    Returns:
+        รายการสัญลักษณ์คริปโตที่รองรับ
+    """
+    try:
+        global SYMBOLS
+        symbols = env.get_available_symbols()
+        # อัปเดตตัวแปร SYMBOLS เพื่อให้ใช้ค่าล่าสุดเสมอ
+        SYMBOLS = symbols
+        
+        return SymbolResponse(
+            success=True,
+            message=f"พบ {len(symbols)} สัญลักษณ์",
+            symbols=symbols
+        )
+    except Exception as e:
+        return SymbolResponse(
+            success=False,
+            message=f"เกิดข้อผิดพลาด: {str(e)}",
+            symbols=[]
+        )
+
+@app.post("/api/symbols/add", response_model=SymbolResponse)
+async def add_symbol(request: SymbolRequest):
+    """
+    เพิ่มสัญลักษณ์คริปโตใหม่
+    
+    Args:
+        request: ข้อมูลสัญลักษณ์ที่จะเพิ่ม
+        
+    Returns:
+        สถานะการเพิ่มและรายการสัญลักษณ์ที่อัปเดตแล้ว
+    """
+    try:
+        # ตรวจสอบรูปแบบของสัญลักษณ์
+        symbol = request.symbol.strip().upper()
+        if not symbol.endswith("USDT"):
+            return SymbolResponse(
+                success=False,
+                message="สัญลักษณ์ต้องลงท้ายด้วย USDT",
+                symbols=env.get_available_symbols()
+            )
+        
+        # เพิ่มสัญลักษณ์ใหม่
+        success = env.add_symbol(symbol)
+        
+        # ถ้าเพิ่มสำเร็จ ให้อัปเดตตัวแปร SYMBOLS
+        if success:
+            # อัปเดตตัวแปรในระดับแอปพลิเคชัน
+            global SYMBOLS
+            SYMBOLS = env.get_available_symbols()
+            
+            return SymbolResponse(
+                success=True,
+                message=f"เพิ่มสัญลักษณ์ {symbol} สำเร็จ",
+                symbols=SYMBOLS
+            )
+        else:
+            return SymbolResponse(
+                success=False,
+                message=f"ไม่สามารถเพิ่มสัญลักษณ์ {symbol} ได้ (อาจมีอยู่แล้ว)",
+                symbols=env.get_available_symbols()
+            )
+            
+    except Exception as e:
+        return SymbolResponse(
+            success=False,
+            message=f"เกิดข้อผิดพลาด: {str(e)}",
+            symbols=env.get_available_symbols()
+        )
+
+@app.post("/api/symbols/remove", response_model=SymbolResponse)
+async def remove_symbol(request: SymbolRequest):
+    """
+    ลบสัญลักษณ์คริปโตที่มีอยู่
+    
+    Args:
+        request: ข้อมูลสัญลักษณ์ที่จะลบ
+        
+    Returns:
+        สถานะการลบและรายการสัญลักษณ์ที่อัปเดตแล้ว
+    """
+    try:
+        symbol = request.symbol.strip().upper()
+        success = env.remove_symbol(symbol)
+        
+        # ถ้าลบสำเร็จ ให้อัปเดตตัวแปร SYMBOLS
+        if success:
+            # อัปเดตตัวแปรในระดับแอปพลิเคชัน
+            global SYMBOLS
+            SYMBOLS = env.get_available_symbols()
+            
+            return SymbolResponse(
+                success=True,
+                message=f"ลบสัญลักษณ์ {symbol} สำเร็จ",
+                symbols=SYMBOLS
+            )
+        else:
+            return SymbolResponse(
+                success=False,
+                message=f"ไม่สามารถลบสัญลักษณ์ {symbol} ได้ (อาจไม่พบหรือเป็นสัญลักษณ์สุดท้าย)",
+                symbols=env.get_available_symbols()
+            )
+            
+    except Exception as e:
+        return SymbolResponse(
+            success=False,
+            message=f"เกิดข้อผิดพลาด: {str(e)}",
+            symbols=env.get_available_symbols()
+        )
 
 @app.websocket("/ws/depth/{symbol}")
 async def depth_websocket_endpoint(websocket: WebSocket, symbol: str):

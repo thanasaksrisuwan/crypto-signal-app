@@ -1,13 +1,19 @@
-import os
 import json
 import redis
 import smtplib
 import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from dotenv import load_dotenv
 import logging
 from typing import Dict, Any, List, Optional
+
+import os
+import sys
+
+# นำเข้าโมดูลจัดการตัวแปรสภาพแวดล้อม
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+import env_manager as env
 
 # ตั้งค่า logging
 logging.basicConfig(
@@ -16,25 +22,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("notification_service")
 
-# โหลดตัวแปรสภาพแวดล้อม
-load_dotenv()
-
 # ตั้งค่าการเชื่อมต่อ Redis
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+redis_config = env.get_redis_config()
 REDIS_SIGNAL_CHANNEL = "crypto_signals:signals"
 
 # ตั้งค่าการส่งอีเมล
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-EMAIL_RECIPIENTS = os.getenv("EMAIL_RECIPIENTS", "").split(",")
+SMTP_SERVER = env.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = env.getenv("SMTP_PORT", 587, int)
+SMTP_USERNAME = env.getenv("SMTP_USERNAME", "")
+SMTP_PASSWORD = env.getenv("SMTP_PASSWORD", "")
+EMAIL_RECIPIENTS = env.getenv("EMAIL_RECIPIENTS", "").split(",") if env.getenv("EMAIL_RECIPIENTS") else []
 
 # ตั้งค่า Webhook
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+notification_config = env.get_notification_config()
+WEBHOOK_URL = env.getenv("WEBHOOK_URL", "")
 
 class NotificationService:
     """บริการแจ้งเตือนที่ส่งการแจ้งเตือนเมื่อได้รับสัญญาณการซื้อขายใหม่"""
@@ -42,9 +43,9 @@ class NotificationService:
     def __init__(self):
         """เริ่มต้นบริการแจ้งเตือนด้วยการเชื่อมต่อกับ Redis"""
         self.redis_client = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            password=REDIS_PASSWORD,
+            host=redis_config["host"],
+            port=redis_config["port"],
+            password=redis_config["password"],
             decode_responses=True
         )
         self.pubsub = self.redis_client.pubsub()

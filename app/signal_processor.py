@@ -3,8 +3,14 @@ from enum import Enum
 from typing import Tuple, Dict, Any, List, Optional
 import pandas as pd
 import json
+
 import os
-from dotenv import load_dotenv
+import sys
+
+# นำเข้าโมดูลจัดการตัวแปรสภาพแวดล้อม
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+import env_manager as env
 
 # นำเข้าคลาส Redis Manager ที่สร้างใหม่
 from .redis_manager import get_redis_client
@@ -34,13 +40,8 @@ except (ImportError, ModuleNotFoundError):
                 def close(self):
                     pass
 
-# โหลด environment variables
-load_dotenv()
-
 # ตั้งค่าการเชื่อมต่อ Redis
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+redis_config = env.get_redis_config()
 REDIS_SIGNAL_CHANNEL = "crypto_signals:signals"
 
 # คลาส Enum สำหรับประเภทสัญญาณ

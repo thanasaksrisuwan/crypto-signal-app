@@ -22,8 +22,8 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 REDIS_CHANNEL_PREFIX = "crypto_signals:kline:"
 
-# Default symbols to monitor
-SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+# Default symbols to monitor - โหลดจากตัวแปรสภาพแวดล้อม
+SYMBOLS = env.get_available_symbols()
 
 # WebSocket endpoints
 BINANCE_WS_API_ENDPOINT = "wss://ws-api.binance.com:443/ws-api/v3"

@@ -61,22 +61,6 @@ cp .env.example .env
 
 4. Edit the `.env` file with your configuration values (API keys, database credentials, etc.)
 
-5. Configure trading symbols using one of these methods:
-
-```
-# Method 1: Edit in .env file
-AVAILABLE_SYMBOLS=BTCUSDT,ETHUSDT,DOGEUSDT
-
-# Method 2: Use the command line tool
-crypto-symbol-manager.bat list
-crypto-symbol-manager.bat add DOGEUSDT
-crypto-symbol-manager.bat remove SOLUSDT
-
-# Method 3: Use the UI in the Settings panel
-```
-
-See [SYMBOL-MANAGEMENT.md](SYMBOL-MANAGEMENT.md) for more details on symbol management.
-
 5. Install frontend dependencies:
 
 ```bash
@@ -123,10 +107,7 @@ The application will be available at:
 - Adjust confidence threshold
 - Toggle weak signal visibility
 - Configure notification preferences
-- Add/remove symbols via UI
 - Select trading pairs
-
-For detailed instructions on managing trading symbols, see [SYMBOL-MANAGEMENT.md](SYMBOL-MANAGEMENT.md).
 
 ### System Settings
 

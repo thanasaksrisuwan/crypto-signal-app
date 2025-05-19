@@ -7,7 +7,13 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Union, Callable, Any
 
-from dotenv import load_dotenv
+import os
+import sys
+
+# นำเข้าโมดูลจัดการตัวแปรสภาพแวดล้อม
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+import env_manager as env
 
 # นำเข้าคลาส InfluxDBStorage
 try:
@@ -48,17 +54,12 @@ except (ImportError, ModuleNotFoundError):
                 def close(self):
                     pass
 
-# โหลด environment variables
-load_dotenv()
-
 # ค่าตัวแปรสำหรับการเชื่อมต่อ
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+redis_config = env.get_redis_config()
 REDIS_CHANNEL_PREFIX = "crypto_signals:kline:"
 
-# สัญลักษณ์คริปโตที่จะติดตาม
-SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+# สัญลักษณ์คริปโตที่จะติดตาม - โหลดจากตัวแปรสภาพแวดล้อม
+SYMBOLS = env.get_available_symbols()
 
 # Binance WebSocket endpoints
 BINANCE_WS_API_ENDPOINT = "wss://ws-api.binance.com:443/ws-api/v3"  # API endpoint

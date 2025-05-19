@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import './UserSettings.css';
+import SymbolManager from './SymbolManager';
 
 // คอมโพเนนต์การตั้งค่าผู้ใช้
 const UserSettings = ({ settings, onSettingsChange }) => {
@@ -53,11 +54,16 @@ const UserSettings = ({ settings, onSettingsChange }) => {
           เปิดใช้เพื่อแสดงสัญญาณอ่อน (weak buy/sell) ในหน้าจอและประวัติ
         </p>
       </div>
+        {/* การจัดการสัญลักษณ์ */}
+      <div className="settings-group">
+        <SymbolManager />
+      </div>
       
       <div className="settings-info">
         <h4>ข้อมูลการตั้งค่า</h4>
         <p>การตั้งค่าจะถูกบันทึกอัตโนมัติในเบราว์เซอร์ของคุณและจะถูกใช้ในการเข้าชมครั้งต่อไป</p>
         <p>การตั้งค่าเหล่านี้จะกรองเฉพาะการแสดงผลในหน้าจอ ไม่กระทบกับการเก็บข้อมูลใดๆ</p>
+        <p>การเพิ่มหรือลบสัญลักษณ์จะมีผลกับระบบทันที และจะถูกบันทึกในไฟล์ .env</p>
       </div>
     </div>
   );

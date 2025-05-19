@@ -6,35 +6,35 @@ import uvicorn
 import json
 import asyncio
 from datetime import datetime
+import sys
+
+# Ensure the app directory is in the Python path
 import os
-from dotenv import load_dotenv
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# นำเข้าโมดูลจัดการตัวแปรสภาพแวดล้อม
+import os
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+import env_manager as env
 
 # ใช้ RedisManager แทนการสร้าง Redis client แยก
 from redis_manager import get_redis_client, check_redis_connection
 
 # นำเข้าคลาสและฟังก์ชันที่เราสร้างไว้
-import sys
-import os
-# Ensure the app directory is in the Python path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from binance_ws_client import BinanceWebSocketClient
 from signal_processor import SignalProcessor, grade_signal
 from notification_service import NotificationService
 from enhanced_memory_monitor import enhanced_memory_monitor
 
-# โหลด environment variables
-load_dotenv()
+# โหลดรายการสัญลักษณ์คริปโตที่รองรับจากตัวแปรสภาพแวดล้อม
+SYMBOLS = env.get_available_symbols()
 
 # ตั้งค่าการเชื่อมต่อกับ Redis
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+redis_config = env.get_redis_config()
 REDIS_SIGNAL_CHANNEL = "crypto_signals:signals"
 REDIS_KLINE_CHANNEL_PREFIX = "crypto_signals:kline:"
-
-# สัญลักษณ์คริปโตที่เราติดตาม
-SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
 # ตั้งค่าแอพพลิเคชัน FastAPI
 app = FastAPI(
@@ -61,6 +61,15 @@ class Signal(BaseModel):
     category: str  # strong buy, weak buy, hold, weak sell, strong sell
     price: Optional[float] = None
     indicators: Optional[Dict[str, Optional[float]]] = None
+
+# นำเข้า Pydantic models ที่ต้องใช้
+class SymbolRequest(BaseModel):
+    symbol: str
+
+class SymbolResponse(BaseModel):
+    success: bool
+    message: str
+    symbols: List[str]
 
 # ตัวแปรที่ใช้ตรวจสอบสถานะ Redis
 redis_connected = False
@@ -390,29 +399,143 @@ async def get_latest_indicators(symbol: str = "BTCUSDT"):
         print(f"❌ Error fetching latest indicators: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching latest indicators: {str(e)}")
 
-# ฟังก์ชันสำหรับส่ง heartbeat ให้ client อย่างสม่ำเสมอ (ไม่ได้ใช้ในเวอร์ชันนี้)
-# async def send_heartbeat(websocket: WebSocket, interval: int = 30):
-#     """
-#     ฟังก์ชันสำหรับส่ง heartbeat ไปยัง WebSocket client เพื่อตรวจสอบว่าการเชื่อมต่อยังคงใช้งานได้
-#     
-#     Args:
-#         websocket: WebSocket connection
-#         interval: ช่วงเวลาในการส่ง heartbeat (วินาที)
-#     """
-#     try:
-#         while True:
-#             await asyncio.sleep(interval)
-#             try:
-#                 await websocket.send_json({
-#                     "type": "ping",
-#                     "timestamp": int(datetime.now().timestamp())
-#                 })
-#             except Exception:
-#                 # หากไม่สามารถส่งได้ ให้ถือว่า WebSocket ถูกตัดการเชื่อมต่อ
-#                 break
-#     except asyncio.CancelledError:
-#         # ยกเลิกอย่างสง่างาม
-#         pass
+# API endpoints สำหรับจัดการสัญลักษณ์คริปโต
+@app.get("/api/symbols", response_model=SymbolResponse)
+async def get_symbols():
+    """
+    ดึงรายการสัญลักษณ์ที่รองรับทั้งหมด
+    
+    Returns:
+        รายการสัญลักษณ์คริปโตที่รองรับ
+    """
+    try:
+        symbols = env.get_available_symbols()
+        return SymbolResponse(
+            success=True,
+            message=f"พบ {len(symbols)} สัญลักษณ์",
+            symbols=symbols
+        )
+    except Exception as e:
+        return SymbolResponse(
+            success=False,
+            message=f"เกิดข้อผิดพลาด: {str(e)}",
+            symbols=[]
+        )
+
+@app.post("/api/symbols/add", response_model=SymbolResponse)
+async def add_symbol(request: SymbolRequest, background_tasks: BackgroundTasks):
+    """
+    เพิ่มสัญลักษณ์คริปโตใหม่
+    
+    Args:
+        request: ข้อมูลสัญลักษณ์ที่จะเพิ่ม
+        
+    Returns:
+        สถานะการเพิ่มและรายการสัญลักษณ์ที่อัปเดตแล้ว
+    """
+    try:
+        # ตรวจสอบรูปแบบของสัญลักษณ์
+        symbol = request.symbol.strip().upper()
+        if not symbol.endswith("USDT"):
+            return SymbolResponse(
+                success=False,
+                message="สัญลักษณ์ต้องลงท้ายด้วย USDT",
+                symbols=env.get_available_symbols()
+            )
+        
+        # เพิ่มสัญลักษณ์ใหม่
+        success = env.add_symbol(symbol)
+        
+        # ถ้าเพิ่มสำเร็จ ให้รีสตาร์ท Binance WebSocket client
+        if success:
+            # อัปเดตตัวแปรในระดับแอปพลิเคชัน
+            global SYMBOLS
+            SYMBOLS = env.get_available_symbols()
+            
+            # รีสตาร์ท WebSocket client ใน background task
+            background_tasks.add_task(restart_websocket_client)
+            
+            return SymbolResponse(
+                success=True,
+                message=f"เพิ่มสัญลักษณ์ {symbol} สำเร็จ และกำลังเริ่มการติดตาม",
+                symbols=SYMBOLS
+            )
+        else:
+            return SymbolResponse(
+                success=False,
+                message=f"ไม่สามารถเพิ่มสัญลักษณ์ {symbol} ได้ (อาจมีอยู่แล้ว)",
+                symbols=env.get_available_symbols()
+            )
+            
+    except Exception as e:
+        return SymbolResponse(
+            success=False,
+            message=f"เกิดข้อผิดพลาด: {str(e)}",
+            symbols=env.get_available_symbols()
+        )
+
+@app.post("/api/symbols/remove", response_model=SymbolResponse)
+async def remove_symbol(request: SymbolRequest, background_tasks: BackgroundTasks):
+    """
+    ลบสัญลักษณ์คริปโตที่มีอยู่
+    
+    Args:
+        request: ข้อมูลสัญลักษณ์ที่จะลบ
+        
+    Returns:
+        สถานะการลบและรายการสัญลักษณ์ที่อัปเดตแล้ว
+    """
+    try:
+        symbol = request.symbol.strip().upper()
+        success = env.remove_symbol(symbol)
+        
+        # ถ้าลบสำเร็จ ให้รีสตาร์ท Binance WebSocket client
+        if success:
+            # อัปเดตตัวแปรในระดับแอปพลิเคชัน
+            global SYMBOLS
+            SYMBOLS = env.get_available_symbols()
+            
+            # รีสตาร์ท WebSocket client ใน background task
+            background_tasks.add_task(restart_websocket_client)
+            
+            return SymbolResponse(
+                success=True,
+                message=f"ลบสัญลักษณ์ {symbol} สำเร็จ",
+                symbols=SYMBOLS
+            )
+        else:
+            return SymbolResponse(
+                success=False,
+                message=f"ไม่สามารถลบสัญลักษณ์ {symbol} ได้ (อาจไม่พบหรือเป็นสัญลักษณ์สุดท้าย)",
+                symbols=env.get_available_symbols()
+            )
+            
+    except Exception as e:
+        return SymbolResponse(
+            success=False,
+            message=f"เกิดข้อผิดพลาด: {str(e)}",
+            symbols=env.get_available_symbols()
+        )
+
+# ฟังก์ชันสำหรับรีสตาร์ท WebSocket client
+async def restart_websocket_client():
+    """รีสตาร์ท Binance WebSocket client เพื่อปรับปรุงรายการสัญลักษณ์ที่ติดตาม"""
+    try:
+        # ปิดการเชื่อมต่อ WebSocket เดิม (ถ้ามี)
+        if hasattr(app, 'ws_client') and app.ws_client:
+            await app.ws_client.close()
+        
+        # สร้างอินสแตนซ์ใหม่ด้วยสัญลักษณ์ที่อัปเดตแล้ว
+        app.ws_client = BinanceWebSocketClient(SYMBOLS)
+        
+        # เริ่มการติดตามราคาและข้อมูลอื่น ๆ
+        asyncio.create_task(app.ws_client.start_kline_streams())
+        
+        # บันทึกการทำงาน
+        logger.info(f"รีสตาร์ท WebSocket client สำเร็จ กับสัญลักษณ์: {', '.join(SYMBOLS)}")
+        
+    except Exception as e:
+        logger.error(f"เกิดข้อผิดพลาดในการรีสตาร์ท WebSocket client: {e}")
 
 @app.websocket("/ws/signals")
 async def websocket_endpoint(websocket: WebSocket):
@@ -834,7 +957,7 @@ async def process_kline_data():
                                         else:
                                             print(f"⚠️ ไม่พบการบันทึกสัญญาณล่าสุดสำหรับ {symbol}")
                                     except Exception as e:
-                                        print(f"⚠️ ไม่สามารถตรวจสอบสัญญาณล่าสุดได้: {e}")
+                                        print(f"⚠️ ไม่สามารถตรวจสอบสัญลักษณ์ล่าสุดได้: {e}")
                             else:
                                 print(f"⚠️ ได้รับข้อมูลสำหรับสัญลักษณ์ที่ไม่รู้จัก: {symbol}")
                         else:

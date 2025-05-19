@@ -1,20 +1,20 @@
-import os
 import json
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Union
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
-from dotenv import load_dotenv
 
-# โหลด environment variables
-load_dotenv()
+import os
+import sys
+
+# นำเข้าโมดูลจัดการตัวแปรสภาพแวดล้อม
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+import env_manager as env
 
 # ตั้งค่าการเชื่อมต่อ InfluxDB
-INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
-INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "")
-INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "crypto_signals")
-INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "crypto_data")
+influxdb_config = env.get_influxdb_config()
 
 
 class InfluxDBStorage:
@@ -28,13 +28,12 @@ class InfluxDBStorage:
             batch_size: จำนวนข้อมูลสูงสุดต่อ batch
             flush_interval: ระยะเวลา (ms) ในการ flush batch อัตโนมัติ
         """
-        try:
-            from influxdb_client.client.write_api import ASYNCHRONOUS
+        try:            from influxdb_client.client.write_api import ASYNCHRONOUS
             
             self.client = InfluxDBClient(
-                url=INFLUXDB_URL,
-                token=INFLUXDB_TOKEN,
-                org=INFLUXDB_ORG,
+                url=influxdb_config["url"],
+                token=influxdb_config["token"],
+                org=influxdb_config["org"],
                 enable_gzip=True  # เปิดใช้การบีบอัดข้อมูล
             )
             

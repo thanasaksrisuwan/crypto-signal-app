@@ -2,17 +2,14 @@
 Redis Connection Manager - สร้าง Redis connection pool เพื่อใช้ร่วมกันในแอพพลิเคชัน
 """
 import redis
-import os
-from dotenv import load_dotenv
 from typing import Optional
+import os
+import sys
 
-# โหลด environment variables
-load_dotenv()
-
-# ตั้งค่าการเชื่อมต่อกับ Redis
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+# นำเข้าโมดูลจัดการตัวแปรสภาพแวดล้อม
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+import env_manager as env
 
 class RedisManager:
     """
@@ -35,17 +32,19 @@ class RedisManager:
         if RedisManager._instance is None:
             RedisManager._instance = RedisManager()
         return RedisManager._instance
-    
-    def __init__(self):
+      def __init__(self):
         """เริ่มต้น connection pool สำหรับ Redis"""
         if RedisManager._pool is not None:
             return
             
+        # ดึงการตั้งค่า Redis จาก env_manager
+        redis_config = env.get_redis_config()
+        
         # สร้าง pool สำหรับข้อมูลไบนารี (สำหรับใช้กับ pickle และการบีบอัด)
         self._pool = redis.ConnectionPool(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            password=REDIS_PASSWORD,
+            host=redis_config["host"],
+            port=redis_config["port"],
+            password=redis_config["password"],
             decode_responses=False,
             max_connections=20,
             socket_timeout=5,
@@ -56,8 +55,8 @@ class RedisManager:
         
         # สร้าง pool สำหรับข้อความ (สำหรับใช้กับ JSON)
         self._text_pool = redis.ConnectionPool(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
+            host=redis_config["host"],
+            port=redis_config["port"],
             password=REDIS_PASSWORD,
             decode_responses=True,
             max_connections=20,
