@@ -1,0 +1,139 @@
+.indicator-helper-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.indicator-helper-modal {
+  background-color: #1E1E1E;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 800px;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  color: #D9D9D9;
+  border: 1px solid #2B2B43;
+}
+
+.indicator-helper-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #2B2B43;
+}
+
+.indicator-helper-header h3 {
+  margin: 0;
+  font-size: 18px;
+  color: #D9D9D9;
+}
+
+.close-button {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: #758696;
+}
+
+.close-button:hover {
+  color: #D9D9D9;
+}
+
+.indicator-helper-content {
+  padding: 20px;
+}
+
+.indicator-item {
+  margin-bottom: 32px;
+  padding: 16px;
+  border-radius: 6px;
+  background-color: #262626;
+  border-left: 3px solid;
+}
+
+.indicator-item:nth-child(1) {
+  border-left-color: #E91E63; /* RSI */
+}
+
+.indicator-item:nth-child(2) {
+  border-left-color: #2196F3; /* MACD */
+}
+
+.indicator-item:nth-child(3) {
+  border-left-color: #FF9800; /* EMA */
+}
+
+.indicator-item:nth-child(4) {
+  border-left-color: #7E57C2; /* SMA */
+}
+
+.indicator-item h4 {
+  margin-top: 0;
+  margin-bottom: 12px;
+  color: #D9D9D9;
+}
+
+.indicator-item p {
+  margin-bottom: 16px;
+  line-height: 1.5;
+  color: #AAAAAA;
+}
+
+.indicator-interpretation h5, 
+.indicator-formula h5 {
+  margin-top: 0;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: #D9D9D9;
+}
+
+.indicator-interpretation ul {
+  padding-left: 20px;
+  margin-top: 8px;
+  margin-bottom: 16px;
+}
+
+.indicator-interpretation li {
+  margin-bottom: 6px;
+  color: #AAAAAA;
+}
+
+.indicator-formula pre {
+  background-color: #1A1A1A;
+  padding: 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+  color: #7E57C2;
+  margin-top: 8px;
+  margin-bottom: 16px;
+}
+
+.indicator-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.indicator-select-button {
+  background-color: #2B2B43;
+  color: #D9D9D9;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.indicator-select-button:hover {
+  background-color: #3B3B6B;
+}

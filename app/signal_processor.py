@@ -2,10 +2,12 @@ import numpy as np
 from enum import Enum
 from typing import Tuple, Dict, Any, List, Optional
 import pandas as pd
-import redis
 import json
 import os
 from dotenv import load_dotenv
+
+# นำเข้าคลาส Redis Manager ที่สร้างใหม่
+from .redis_manager import get_redis_client
 
 # นำเข้าคลาส InfluxDBStorage ด้วยการลองหลายวิธี
 try:
@@ -49,121 +51,19 @@ class SignalCategory(str, Enum):
     WEAK_SELL = "weak sell"
     STRONG_SELL = "strong sell"
 
-def calculate_ema(prices: List[float], period: int) -> List[float]:
-    """
-    คำนวณ Exponential Moving Average (EMA)
-    
-    Args:
-        prices: รายการราคาปิด
-        period: ระยะเวลาของ EMA (จำนวนแท่งเทียน)
-        
-    Returns:
-        List ของค่า EMA
-    """
-    return pd.Series(prices).ewm(span=period, adjust=False).mean().tolist()
-
-def calculate_sma(prices: List[float], period: int) -> List[float]:
-    """
-    คำนวณ Simple Moving Average (SMA)
-    
-    Args:
-        prices: รายการราคาปิด
-        period: ระยะเวลาของ SMA (จำนวนแท่งเทียน)
-        
-    Returns:
-        List ของค่า SMA
-    """
-    return pd.Series(prices).rolling(window=period).mean().tolist()
-
-def calculate_rsi(prices: List[float], period: int = 14) -> List[float]:
-    """
-    คำนวณ Relative Strength Index (RSI)
-    
-    Args:
-        prices: รายการราคาปิด
-        period: ระยะเวลาของ RSI (โดยปกติคือ 14)
-        
-    Returns:
-        List ของค่า RSI
-    """
-    # ถ้ามีข้อมูลไม่เพียงพอ ให้ส่งคืนลิสต์ที่มีค่า None
-    if len(prices) < period + 1:
-        return [None] * len(prices)
-        
-    deltas = np.diff(prices)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    
-    # วิธีการคำนวณแบบปลอดภัยกว่า โดยใช้การคำนวณเริ่มต้นที่ถูกต้อง
-    avg_gain = np.zeros_like(prices, dtype=float)
-    avg_loss = np.zeros_like(prices, dtype=float)
-    
-    # คำนวณค่าเฉลี่ยของ gain และ loss ช่วงแรก
-    if len(gains) >= period:
-        avg_gain[period] = np.mean(gains[:period])
-        avg_loss[period] = np.mean(losses[:period])
-    
-        # คำนวณค่าเฉลี่ยแบบถ่วงน้ำหนักสำหรับวันที่เหลือ
-        for i in range(period + 1, len(prices)):
-            if i - 1 < len(gains):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gains[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + losses[i-1]) / period
-    
-    # คำนวณ RS และ RSI
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # แทนที่ค่า NaN ด้วย None
-    rsi = np.where(np.isnan(rsi), None, rsi)
-    
-    return rsi.tolist()
-
-def grade_signal(forecast_pct: float, confidence: float) -> str:
-    """
-    วิเคราะห์ข้อมูลการคาดการณ์เปอร์เซ็นต์การเปลี่ยนแปลงและความมั่นใจ เพื่อจัดประเภทสัญญาณการซื้อขาย
-    
-    Args:
-        forecast_pct: เปอร์เซ็นต์การเปลี่ยนแปลงราคาที่คาดการณ์ (+ คือขึ้น, - คือลง)
-        confidence: ค่าความมั่นใจของการคาดการณ์ (0.0-1.0)
-        
-    Returns:
-        ประเภทของสัญญาณ: strong buy, weak buy, hold, weak sell, หรือ strong sell
-    """
-    if not (0 <= confidence <= 1.0):
-        raise ValueError("ค่าความมั่นใจต้องอยู่ระหว่าง 0 และ 1")
-    if confidence < 0.6:
-        return SignalCategory.HOLD
-    if forecast_pct > 0:
-        if forecast_pct >= 1.0 and confidence >= 0.8:
-            return SignalCategory.STRONG_BUY
-        elif forecast_pct >= 0.5 or confidence >= 0.7:
-            return SignalCategory.WEAK_BUY
-        else:
-            return SignalCategory.HOLD
-    elif forecast_pct < 0:
-        if forecast_pct <= -1.0 and confidence >= 0.8:
-            return SignalCategory.STRONG_SELL
-        elif forecast_pct <= -0.5 or confidence >= 0.7:
-            return SignalCategory.WEAK_SELL
-        else:
-            return SignalCategory.HOLD
-    else:
-        return SignalCategory.HOLD
+from .cache_manager import cache_manager
 
 class SignalProcessor:
     def __init__(self):
         """เริ่มต้นตัวประมวลผลสัญญาณด้วยการเชื่อมต่อกับ Redis และ InfluxDB"""
-        self.redis_client = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            password=REDIS_PASSWORD,
-            decode_responses=True
-        )
+        # ใช้ Redis client จาก connection pool แทนการสร้างใหม่
+        self.redis_client = get_redis_client(decode_responses=True)
         
         # สร้างอินสแตนซ์ของ InfluxDBStorage
         self.influxdb_storage = InfluxDBStorage()
         
         self.price_history = {}
+        self.cache = cache_manager
         
     def update_price_history(self, symbol: str, price: float):
         """
@@ -178,6 +78,38 @@ class SignalProcessor:
         self.price_history[symbol].append(price)
         if len(self.price_history[symbol]) > 50:
             self.price_history[symbol] = self.price_history[symbol][-50:]
+    
+    @cache_manager.cache_technical_indicator
+    def calculate_ema(self, prices: List[float], period: int) -> List[float]:
+        """
+        คำนวณ EMA พร้อมการแคช
+        """
+        return pd.Series(prices).ewm(span=period, adjust=False).mean().tolist()
+        
+    @cache_manager.cache_technical_indicator
+    def calculate_rsi(self, prices: List[float], period: int = 14) -> List[float]:
+        """
+        คำนวณ RSI พร้อมการแคช
+        """
+        prices_np = np.array(prices)
+        deltas = np.diff(prices_np)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+        
+        avg_gains = np.zeros_like(prices_np)
+        avg_losses = np.zeros_like(prices_np)
+        
+        avg_gains[period] = np.mean(gains[:period])
+        avg_losses[period] = np.mean(losses[:period])
+        
+        for i in range(period + 1, len(prices_np)):
+            avg_gains[i] = (avg_gains[i-1] * (period - 1) + gains[i-1]) / period
+            avg_losses[i] = (avg_losses[i-1] * (period - 1) + losses[i-1]) / period
+        
+        rs = avg_gains[period:] / (avg_losses[period:] + 1e-10)
+        rsi = 100 - (100 / (1 + rs))
+        
+        return [None] * period + rsi.tolist()
     
     def calculate_indicators(self, symbol: str) -> Dict[str, Any]:
         """
@@ -197,10 +129,10 @@ class SignalProcessor:
                 'rsi14': None
             }
         prices = self.price_history[symbol]
-        ema9_values = calculate_ema(prices, 9)
-        ema21_values = calculate_ema(prices, 21)
-        sma20_values = calculate_sma(prices, 20)
-        rsi14_values = calculate_rsi(prices, 14)
+        ema9_values = self.calculate_ema(prices, 9)
+        ema21_values = self.calculate_ema(prices, 21)
+        sma20_values = pd.Series(prices).rolling(window=20).mean().tolist()
+        rsi14_values = self.calculate_rsi(prices, 14)
         return {
             'ema9': ema9_values[-1] if ema9_values and len(ema9_values) > 0 else None,
             'ema21': ema21_values[-1] if ema21_values and len(ema21_values) > 0 else None,
@@ -245,15 +177,14 @@ class SignalProcessor:
     
     def process_market_data(self, symbol: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        ประมวลผลข้อมูลตลาดเพื่อสร้างการคาดการณ์และสัญญาณ
-        
-        Args:
-            symbol: สัญลักษณ์คู่สกุลเงินที่กำลังวิเคราะห์
-            data: ข้อมูลแท่งเทียนล่าสุด
-            
-        Returns:
-            สัญญาณที่สร้างขึ้น หรือ None ถ้าไม่มีสัญญาณใหม่
+        ประมวลผลข้อมูลตลาดพร้อมการแคช
         """
+        cache_key = f"{symbol}:processed_data"
+        cached_result = self.cache.get_market_data(symbol, "processed")
+        
+        if cached_result:
+            return cached_result
+            
         try:
             if data.get('is_closed', False):
                 open_price = float(data.get('open', 0))
@@ -303,6 +234,9 @@ class SignalProcessor:
                         print(f"เกิดข้อผิดพลาดในการบันทึกสัญญาณลง InfluxDB: {e}")
                         # ไม่ควรล้มเหลวเนื่องจาก InfluxDB ไม่พร้อมใช้งาน
                     
+                    # บันทึกลงแคช
+                    self.cache.set_market_data(symbol, "processed", signal)
+                    
                     return signal
             return None
         except Exception as e:
@@ -316,6 +250,38 @@ class SignalProcessor:
             print("ปิดการเชื่อมต่อกับ InfluxDB")
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการปิดการเชื่อมต่อกับ InfluxDB: {e}")
+
+def grade_signal(forecast_pct: float, confidence: float) -> str:
+    """
+    วิเคราะห์ข้อมูลการคาดการณ์เปอร์เซ็นต์การเปลี่ยนแปลงและความมั่นใจ เพื่อจัดประเภทสัญญาณการซื้อขาย
+    
+    Args:
+        forecast_pct: เปอร์เซ็นต์การเปลี่ยนแปลงราคาที่คาดการณ์ (+ คือขึ้น, - คือลง)
+        confidence: ค่าความมั่นใจของการคาดการณ์ (0.0-1.0)
+        
+    Returns:
+        ประเภทของสัญญาณ: strong buy, weak buy, hold, weak sell, หรือ strong sell
+    """
+    if not (0 <= confidence <= 1.0):
+        raise ValueError("ค่าความมั่นใจต้องอยู่ระหว่าง 0 และ 1")
+    if confidence < 0.6:
+        return SignalCategory.HOLD
+    if forecast_pct > 0:
+        if forecast_pct >= 1.0 and confidence >= 0.8:
+            return SignalCategory.STRONG_BUY
+        elif forecast_pct >= 0.5 or confidence >= 0.7:
+            return SignalCategory.WEAK_BUY
+        else:
+            return SignalCategory.HOLD
+    elif forecast_pct < 0:
+        if forecast_pct <= -1.0 and confidence >= 0.8:
+            return SignalCategory.STRONG_SELL
+        elif forecast_pct <= -0.5 or confidence >= 0.7:
+            return SignalCategory.WEAK_SELL
+        else:
+            return SignalCategory.HOLD
+    else:
+        return SignalCategory.HOLD
 
 # ตัวอย่างการใช้งาน
 if __name__ == "__main__":

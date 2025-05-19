@@ -1,0 +1,152 @@
+.indicator-info-widget {
+  background-color: #1E1E1E;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  color: #D9D9D9;
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+
+.widget-header {
+  background-color: #2C2C2C;
+  border-bottom: 1px solid #3A3A3A;
+  padding: 12px 16px;
+}
+
+.widget-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 10px 0;
+}
+
+.tab-selector {
+  display: flex;
+  gap: 8px;
+}
+
+.tab-btn {
+  background-color: #3A3A3A;
+  border: none;
+  border-radius: 4px;
+  color: #B9B9B9;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 12px;
+  flex-grow: 1;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+  background-color: #4A4A4A;
+}
+
+.tab-btn.active {
+  background-color: #3370ff;
+  color: white;
+}
+
+.widget-content {
+  padding: 16px;
+}
+
+/* ตัวเลือกตัวบ่งชี้ */
+.indicator-selector,
+.style-selector {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.indicator-btn,
+.style-btn {
+  background-color: #2B2B43;
+  border: 1px solid #363A45;
+  border-radius: 4px;
+  color: #B9B9B9;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 12px;
+  transition: all 0.2s ease;
+  flex-grow: 1;
+}
+
+.indicator-btn:hover,
+.style-btn:hover {
+  background-color: #363A45;
+  color: #FFFFFF;
+}
+
+.indicator-btn.active,
+.style-btn.active {
+  background-color: #3370ff;
+  color: white;
+  border-color: #3370ff;
+}
+
+/* ให้สีที่ต่างกันสำหรับแต่ละตัวบ่งชี้ */
+.indicator-btn:nth-of-type(1) {
+  border-left: 3px solid #E91E63; /* RSI */
+}
+
+.indicator-btn:nth-of-type(2) {
+  border-left: 3px solid #2196F3; /* MACD */
+}
+
+.indicator-btn:nth-of-type(3) {
+  border-left: 3px solid #FF9800; /* EMA */
+}
+
+.indicator-btn:nth-of-type(4) {
+  border-left: 3px solid #7E57C2; /* SMA */
+}
+
+/* เนื้อหาข้อมูลตัวบ่งชี้ */
+.indicator-info {
+  background-color: #262626;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.indicator-info pre {
+  margin: 0;
+  font-family: 'Noto Sans Thai', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  font-size: 14px;
+}
+
+/* ข้อมูลสไตล์การเทรด */
+.style-info {
+  background-color: #262626;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.style-info h4 {
+  margin-top: 0;
+  margin-bottom: 16px;
+  color: #D9D9D9;
+  font-size: 15px;
+}
+
+.style-detail {
+  margin-bottom: 16px;
+}
+
+.style-detail h5 {
+  margin-top: 0;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: #B9B9B9;
+}
+
+.style-detail ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.style-detail li {
+  margin-bottom: 4px;
+  font-size: 13px;
+}

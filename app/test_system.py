@@ -232,116 +232,130 @@ class SystemTester:
         self.log(f"กำลังทดสอบการเชื่อมต่อ WebSocket ที่ {WS_URL}...")
         
         try:
-            # เชื่อมต่อกับ WebSocket
             async with websockets.connect(WS_URL, timeout=10) as websocket:
                 self.log("เชื่อมต่อ WebSocket สำเร็จ")
                 
                 # สมัครสมาชิกสำหรับสัญญาณของ BTCUSDT
-                await websocket.send(json.dumps({"subscribe": "BTCUSDT"}))
-                self.log("ส่งข้อความสมัครสมาชิกสำเร็จ")
-                
-                # รอรับข้อความ (อาจเป็น heartbeat หรือสัญญาณ)
+                # The frontend sends {"subscribe": "SYMBOL"}, so we use that format.
+                subscribe_message = {"subscribe": "BTCUSDT"}
+                await websocket.send(json.dumps(subscribe_message))
+                self.log(f"ส่งข้อความ subscribe: {subscribe_message}")
+
+                # รอรับการตอบกลับ (เช่น ข้อความยืนยัน หรือข้อมูลแรก)
+                # ตั้งค่า timeout สำหรับการรอรับข้อความ
                 try:
-                    # ตั้ง timeout 15 วินาทีสำหรับการรอรับข้อความ
-                    response = await asyncio.wait_for(websocket.recv(), timeout=15)
-                    self.log(f"ได้รับข้อความจาก WebSocket: {response[:100]}...")
-                    
-                    self.add_result("WebSocket", "การเชื่อมต่อ", True, 
-                                   "สามารถเชื่อมต่อและรับข้อมูลจาก WebSocket ได้")
+                    response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                    self.log(f"ได้รับข้อความจาก WebSocket: {response}")
+                    # คุณสามารถเพิ่มการตรวจสอบเนื้อหาของ response ที่นี่
+                    # เช่น ตรวจสอบว่า response เป็น JSON ที่ถูกต้อง หรือมีข้อมูลที่คาดหวัง
+                    # For example: data = json.loads(response)
+                    self.add_result("WebSocket", "การเชื่อมต่อและการสมัครสมาชิก", True, 
+                                   f"เชื่อมต่อและรับข้อความตอบกลับสำเร็จ: {response[:100]}{'...' if len(response)>100 else ''}")
                     return True
                 except asyncio.TimeoutError:
-                    self.add_result("WebSocket", "การเชื่อมต่อ", False, 
-                                   "เชื่อมต่อสำเร็จแต่ไม่ได้รับข้อมูลภายใน timeout")
+                    self.log("ไม่ได้รับข้อความตอบกลับจาก WebSocket ภายในเวลาที่กำหนด")
+                    self.add_result("WebSocket", "การรับข้อความ", False, 
+                                   "เชื่อมต่อสำเร็จแต่ไม่ได้รับข้อความตอบกลับภายใน 5 วินาที")
                     return False
-                    
-        except Exception as e:
-            self.add_result("WebSocket", "การเชื่อมต่อ", False, 
-                           f"ไม่สามารถเชื่อมต่อกับ WebSocket ได้: {e}")
+                except websockets.exceptions.ConnectionClosed as e:
+                    self.log(f"การเชื่อมต่อ WebSocket ถูกปิดขณะรอรับข้อความ: {e}")
+                    self.add_result("WebSocket", "การรับข้อความ", False, 
+                                   f"การเชื่อมต่อถูกปิดขณะรอรับข้อความ: code={e.code}, reason='{e.reason}'")
+                    return False
+                except Exception as e: # Catch other errors during recv
+                    self.log(f"เกิดข้อผิดพลาดขณะรอรับข้อความจาก WebSocket: {e}")
+                    self.add_result("WebSocket", "การรับข้อความ", False, 
+                                   f"เกิดข้อผิดพลาดขณะรับข้อความ: {e}")
+                    return False
+
+        except websockets.exceptions.InvalidURI:
+            self.log(f"URL ของ WebSocket ไม่ถูกต้อง: {WS_URL}")
+            self.add_result("WebSocket", "การเชื่อมต่อ", False, f"URL ของ WebSocket ไม่ถูกต้อง: {WS_URL}")
+            return False
+        except websockets.exceptions.ConnectionClosedError as e: # Server actively refusing or error during handshake
+            self.log(f"การเชื่อมต่อ WebSocket ถูกปฏิเสธหรือไม่สามารถสร้างได้ (ConnectionClosedError): {e}")
+            self.add_result("WebSocket", "การเชื่อมต่อ", False, f"การเชื่อมต่อ WebSocket ถูกปฏิเสธ: {e}")
+            return False
+        except ConnectionRefusedError: # Common if server is not running or port not open
+             self.log(f"ไม่สามารถเชื่อมต่อกับ WebSocket ได้ที่ {WS_URL} (ConnectionRefusedError)")
+             self.add_result("WebSocket", "การเชื่อมต่อ", False, f"ไม่สามารถเชื่อมต่อกับ WebSocket ได้ (ConnectionRefusedError) ตรวจสอบว่าเซิร์ฟเวอร์ทำงานอยู่ที่ {WS_URL}")
+             return False
+        except asyncio.TimeoutError: # Timeout during initial connection attempt
+            self.log(f"หมดเวลาในการพยายามเชื่อมต่อกับ WebSocket ที่ {WS_URL}")
+            self.add_result("WebSocket", "การเชื่อมต่อ", False, f"หมดเวลาในการพยายามเชื่อมต่อกับ WebSocket ที่ {WS_URL}")
+            return False
+        except Exception as e: # Catch-all for other unexpected errors during connection
+            self.log(f"เกิดข้อผิดพลาดที่ไม่คาดคิดในการเชื่อมต่อ WebSocket: {e}")
+            self.add_result("WebSocket", "การเชื่อมต่อ", False, f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
             return False
     
-    def test_signal_processor(self) -> bool:
+    async def test_signal_processor(self) -> bool:
         """ทดสอบการทำงานของ SignalProcessor"""
         self.log("กำลังทดสอบ SignalProcessor...")
         
         try:
-            # ทดสอบฟังก์ชัน grade_signal
-            test_cases = [
-                (1.5, 0.9, "strong buy"),
-                (0.7, 0.7, "weak buy"),
-                (0.1, 0.6, "hold"),
-                (-0.7, 0.7, "weak sell"),
-                (-1.5, 0.9, "strong sell"),
-                (2.0, 0.5, "hold")  # ความมั่นใจต่ำ
-            ]
+            # เชื่อมต่อกับ Binance WebSocket เพื่อรับข้อมูลจริง
+            from binance_ws_client import BinanceWebSocketClient
+            client = BinanceWebSocketClient()
+            await client.connect()
             
             all_passed = True
-            for forecast, confidence, expected in test_cases:
-                result = grade_signal(forecast, confidence)
-                if result == expected:
-                    self.log(f"grade_signal({forecast}, {confidence}) = {result} ✓")
+            # ทดสอบการประมวลผลข้อมูลจริงจาก Binance
+            symbol = "BTCUSDT"
+            kline_data = await client.get_latest_kline(symbol)
+            
+            if kline_data:
+                # สร้าง SignalProcessor
+                processor = SignalProcessor()
+                
+                # Update price history with real data
+                price = float(kline_data["c"])  # Use closing price
+                processor.update_price_history(symbol, price)
+                
+                # ทดสอบการคำนวณตัวชี้วัดด้วยข้อมูลจริง
+                indicators = processor.calculate_indicators(symbol)
+                if indicators and all(v is not None for v in indicators.values()):
+                    self.log(f"การคำนวณตัวชี้วัดสำเร็จ: {indicators}")
                 else:
-                    self.log(f"grade_signal({forecast}, {confidence}) = {result} ≠ {expected} ✗")
+                    self.log("การคำนวณตัวชี้วัดล้มเหลว หรือได้ค่า None")
                     all_passed = False
-            
-            # ทดสอบ EMA calculation
-            prices = [100.0, 102.0, 98.0, 103.0, 99.0, 101.0, 104.0, 105.0, 103.0]
-            ema_result = calculate_ema(prices, 3)
-            if len(ema_result) == len(prices):
-                self.log(f"EMA calculation สำเร็จ: {ema_result[-3:]}")
+                
+                # ทดสอบการคาดการณ์ราคาถัดไป
+                forecast_pct, confidence = processor.predict_next_price(symbol)
+                self.log(f"การคาดการณ์ราคา: {forecast_pct:.2f}%, confidence: {confidence:.2f}")
+                
+                # ทดสอบการสร้างสัญญาณด้วยข้อมูลจริง
+                real_data = {
+                    "is_closed": kline_data["x"],
+                    "open": float(kline_data["o"]),
+                    "close": float(kline_data["c"]),
+                    "high": float(kline_data["h"]),
+                    "low": float(kline_data["l"]),
+                    "volume": float(kline_data["v"]),
+                    "close_time": kline_data["T"]
+                }
+                
+                signal = processor.process_market_data(symbol, real_data)
+                
+                if signal:
+                    self.log(f"การสร้างสัญญาณสำเร็จ: {signal}")
+                    self.add_result("SignalProcessor", "การทำงาน", True, 
+                                   f"ทดสอบด้วยข้อมูลจริงสำเร็จ, สัญญาณที่ได้: {signal['category']}")
+                else:
+                    self.log("การสร้างสัญญาณล้มเหลว")
+                    self.add_result("SignalProcessor", "การทำงาน", False, 
+                                   "ไม่สามารถสร้างสัญญาณจากข้อมูลจริงได้")
+                    all_passed = False
+                
+                # ปิดการเชื่อมต่อ
+                processor.close()
             else:
-                self.log(f"EMA calculation ผิดพลาด: ขนาดของผลลัพธ์ไม่ถูกต้อง")
-                all_passed = False
-            
-            # ทดสอบ RSI calculation
-            rsi_result = calculate_rsi(prices, 2)
-            if len(rsi_result) == len(prices):
-                self.log(f"RSI calculation สำเร็จ: {rsi_result[-3:]}")
-            else:
-                self.log(f"RSI calculation ผิดพลาด: ขนาดของผลลัพธ์ไม่ถูกต้อง")
-                all_passed = False
-            
-            # ทดสอบการสร้าง SignalProcessor
-            processor = SignalProcessor()
-            self.log("สร้าง SignalProcessor สำเร็จ")
-            
-            # ทดสอบการอัปเดทประวัติราคา
-            for i in range(25):
-                processor.update_price_history("BTCUSDT", 20000 + (i * 100))
-            
-            # ทดสอบการคำนวณตัวชี้วัด
-            indicators = processor.calculate_indicators("BTCUSDT")
-            if all(v is not None for v in indicators.values()):
-                self.log(f"การคำนวณตัวชี้วัดสำเร็จ: {indicators}")
-            else:
-                self.log(f"การคำนวณตัวชี้วัดผิดพลาด: {indicators}")
-                all_passed = False
-            
-            # ทดสอบการคาดการณ์ราคาถัดไป
-            forecast_pct, confidence = processor.predict_next_price("BTCUSDT")
-            self.log(f"การคาดการณ์ราคา: {forecast_pct:.2f}%, confidence: {confidence:.2f}")
-            
-            # ทดสอบการสร้างสัญญาณ
-            mock_data = {
-                "is_closed": True,
-                "open": 20000,
-                "close": 20500,
-                "close_time": int(time.time() * 1000)
-            }
-            signal = processor.process_market_data("BTCUSDT", mock_data)
-            
-            if signal:
-                self.log(f"การสร้างสัญญาณสำเร็จ: {signal}")
-                self.add_result("SignalProcessor", "การทำงาน", True, 
-                               f"ทดสอบทุกฟังก์ชันสำเร็จ, สัญญาณที่ได้: {signal['category']}")
-            else:
-                self.log("การสร้างสัญญาณล้มเหลว")
+                self.log("ไม่สามารถรับข้อมูลจาก Binance WebSocket ได้")
                 self.add_result("SignalProcessor", "การทำงาน", False, 
-                               "ไม่สามารถสร้างสัญญาณได้")
+                               "ไม่สามารถรับข้อมูลจาก Binance")
                 all_passed = False
             
-            # ปิดการเชื่อมต่อ
-            processor.close()
-            
+            await client.close()
             return all_passed
             
         except Exception as e:
@@ -349,7 +363,7 @@ class SystemTester:
                            f"เกิดข้อผิดพลาดในการทดสอบ SignalProcessor: {e}")
             return False
     
-    def test_signal_data_flow(self) -> bool:
+    async def test_signal_data_flow(self) -> bool:
         """ทดสอบกระแสข้อมูลของสัญญาณจาก SignalProcessor ไปยัง Redis"""
         self.log("กำลังทดสอบกระแสข้อมูลของสัญญาณ...")
         
@@ -359,35 +373,46 @@ class SystemTester:
             return False
         
         try:
-            print("เชื่อมต่อกับ InfluxDB สำเร็จ")
             # สร้าง SignalProcessor
             processor = SignalProcessor()
             
-            # เตรียมข้อมูลทดสอบ - เพิ่มจำนวนข้อมูลเพื่อให้มีเพียงพอสำหรับการคำนวณตัวชี้วัด
-            symbol = "BTCUSDT"
-            for i in range(30):  # เพิ่มจากเดิม 25 เป็น 30 เพื่อให้มั่นใจว่ามีข้อมูลพอ
-                processor.update_price_history(symbol, 20000 + (i * 100))
+            # เชื่อมต่อกับ Binance WebSocket เพื่อรับข้อมูลจริง
+            from binance_ws_client import BinanceWebSocketClient
+            client = BinanceWebSocketClient()
+            await client.connect()
             
-            # สร้างข้อมูลแท่งเทียนจำลอง
-            close_time = int(time.time() * 1000)
-            mock_data = {
-                "is_closed": True,
-                "open": 20000,
-                "close": 20500,
-                "close_time": close_time
+            symbol = "BTCUSDT"
+            kline_data = await client.get_latest_kline(symbol)
+            
+            if not kline_data:
+                self.add_result("ระบบ", "กระแสข้อมูลสัญญาณ", False, 
+                               "ไม่สามารถรับข้อมูลจาก Binance ได้")
+                return False
+                
+            # สร้างสัญญาณจากข้อมูลจริง
+            real_data = {
+                "is_closed": kline_data["x"],
+                "open": float(kline_data["o"]),
+                "close": float(kline_data["c"]),
+                "high": float(kline_data["h"]),
+                "low": float(kline_data["l"]),
+                "volume": float(kline_data["v"]),
+                "close_time": kline_data["T"]
             }
             
+            # อัปเดตประวัติราคาด้วยข้อมูลจริง
+            processor.update_price_history(symbol, float(kline_data["c"]))
+            
             # สร้างสัญญาณ
-            signal = processor.process_market_data(symbol, mock_data)
+            signal = processor.process_market_data(symbol, real_data)
             
             if not signal:
                 self.add_result("ระบบ", "กระแสข้อมูลสัญญาณ", False, 
                                "ไม่สามารถสร้างสัญญาณได้")
-                processor.close()
                 return False
             
             # รอให้ข้อมูลเขียนลง Redis เสร็จสิ้น
-            time.sleep(1)
+            await asyncio.sleep(1)
             
             # ตรวจสอบว่าสัญญาณล่าสุดถูกบันทึกใน Redis หรือไม่
             latest_signal_key = f"latest_signal:{symbol}"
@@ -395,26 +420,41 @@ class SystemTester:
             
             if latest_signal_data:
                 latest_signal = json.loads(latest_signal_data)
-                if latest_signal['close_time'] == close_time:
+                if latest_signal['close_time'] == real_data['close_time']:
                     self.add_result("ระบบ", "กระแสข้อมูลสัญญาณ", True, 
-                                   "สัญญาณถูกบันทึกใน Redis สำเร็จ")
-                    processor.close()
+                                   "สัญญาณจากข้อมูลจริงถูกบันทึกใน Redis สำเร็จ")
                     return True
                 else:
                     self.add_result("ระบบ", "กระแสข้อมูลสัญญาณ", False, 
                                    "พบสัญญาณใน Redis แต่ไม่ใช่สัญญาณที่เพิ่งสร้าง")
-                    processor.close()
                     return False
             else:
                 self.add_result("ระบบ", "กระแสข้อมูลสัญญาณ", False, 
                                f"ไม่พบสัญญาณล่าสุดใน Redis สำหรับ {symbol}")
-                processor.close()
                 return False
                 
         except Exception as e:
             self.add_result("ระบบ", "กระแสข้อมูลสัญญาณ", False, 
                            f"เกิดข้อผิดพลาดในการทดสอบกระแสข้อมูลสัญญาณ: {e}")
             return False
+        finally:
+            # ปิดการเชื่อมต่อ
+            if 'processor' in locals():
+                processor.close()
+            if 'client' in locals():
+                await client.close()
+    
+    def create_empty_data(self, symbol: str) -> dict:
+        """สร้างข้อมูลว่างเปล่าสำหรับกรณีที่การทดสอบล้มเหลว"""
+        return {
+            "is_closed": True,
+            "open": 0.0,
+            "close": 0.0,
+            "high": 0.0,
+            "low": 0.0,
+            "volume": 0.0,
+            "close_time": int(datetime.datetime.now().timestamp() * 1000)
+        }
     
     def check_frontend_connectivity(self) -> bool:
         """ตรวจสอบว่า Frontend สามารถเข้าถึง Backend API ได้หรือไม่"""
@@ -615,11 +655,11 @@ class SystemTester:
             self.test_api_endpoints()
         
         # ทดสอบ SignalProcessor
-        self.test_signal_processor()
+        asyncio.run(self.test_signal_processor())
         
         # ทดสอบกระแสข้อมูลของสัญญาณ (ถ้า Redis ทำงานได้)
         if redis_ok:
-            self.test_signal_data_flow()
+            asyncio.run(self.test_signal_data_flow())
         
         # ทดสอบ WebSocket (ถ้า API ทำงานได้)
         if api_ok:

@@ -4,23 +4,24 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uvicorn
 import json
-import redis
 import asyncio
 from datetime import datetime
 import os
 from dotenv import load_dotenv
 
+# ใช้ RedisManager แทนการสร้าง Redis client แยก
+from redis_manager import get_redis_client, check_redis_connection
+
 # นำเข้าคลาสและฟังก์ชันที่เราสร้างไว้
-try:
-    # เมื่อรันเป็น module
-    from .binance_ws_client import BinanceWebSocketClient
-    from .signal_processor import SignalProcessor, grade_signal
-    from .notification_service import NotificationService
-except ImportError:
-    # เมื่อรันเป็น script โดยตรง
-    from binance_ws_client import BinanceWebSocketClient
-    from signal_processor import SignalProcessor, grade_signal
-    from notification_service import NotificationService
+import sys
+import os
+# Ensure the app directory is in the Python path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from binance_ws_client import BinanceWebSocketClient
+from signal_processor import SignalProcessor, grade_signal
+from notification_service import NotificationService
+from enhanced_memory_monitor import enhanced_memory_monitor
 
 # โหลด environment variables
 load_dotenv()
@@ -69,23 +70,13 @@ redis_client = None
 def connect_to_redis():
     global redis_client, redis_connected
     try:
-        # เชื่อมต่อกับ Redis
-        redis_client = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            password=REDIS_PASSWORD,
-            decode_responses=True,
-            socket_timeout=5
-        )
+        # เชื่อมต่อกับ Redis โดยใช้ connection pool
+        redis_client = get_redis_client(decode_responses=True)
         # ทดสอบการเชื่อมต่อ
-        redis_client.ping()
-        redis_connected = True
-        print(f"✅ เชื่อมต่อกับ Redis สำเร็จที่ {REDIS_HOST}:{REDIS_PORT}")
-        return True
-    except redis.ConnectionError as e:
-        print(f"❌ ไม่สามารถเชื่อมต่อกับ Redis ได้: {e}")
-        redis_connected = False
-        return False
+        redis_connected = redis_client.ping()
+        if redis_connected:
+            print(f"✅ เชื่อมต่อกับ Redis สำเร็จที่ {REDIS_HOST}:{REDIS_PORT}")
+        return redis_connected
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการเชื่อมต่อกับ Redis: {e}")
         redis_connected = False
@@ -94,27 +85,28 @@ def connect_to_redis():
 # เชื่อมต่อกับ Redis
 connect_to_redis()
 
-# สร้าง SignalProcessor
-signal_processor = SignalProcessor()
+# เริ่มการตรวจสอบหน่วยความจำ
+enhanced_memory_monitor.start()
 
-# สร้างข้อมูลจำลองสำหรับกรณีที่ไม่มีข้อมูลจริง
-def create_mock_data(symbol):
-    # สร้างสัญญาณจำลอง
-    mock_signal = {
+# ใช้ OptimizedSignalProcessor แทน SignalProcessor เพื่อประสิทธิภาพที่ดีขึ้น
+from optimized_signal_processor import signal_processor
+
+# สร้างข้อมูลว่างเปล่าเมื่อไม่มีข้อมูลจริง
+def create_empty_signal(symbol: str) -> dict:
+    return {
         "symbol": symbol,
         "timestamp": int(datetime.now().timestamp() * 1000),
-        "forecast_pct": 0.75,
-        "confidence": 0.65,
-        "category": "weak buy",
-        "price": 50000.0 if symbol == "BTCUSDT" else 3000.0,
+        "forecast_pct": 0.0,
+        "confidence": 0.0,
+        "category": "no data",
+        "price": 0.0,
         "indicators": {
-            "ema9": 50100.0 if symbol == "BTCUSDT" else 3050.0,
-            "ema21": 49800.0 if symbol == "BTCUSDT" else 2980.0,
-            "sma20": 49900.0 if symbol == "BTCUSDT" else 2990.0,
-            "rsi14": 58.5
+            "ema9": None,
+            "ema21": None,
+            "sma20": None,
+            "rsi14": None
         }
     }
-    return mock_signal
 
 # จัดการการเชื่อมต่อ WebSocket จาก clients
 class ConnectionManager:
@@ -322,90 +314,46 @@ async def root():
 
 @app.get("/api/latest-signal")
 async def get_latest_signal(symbol: str = "BTCUSDT"):
-    """
-    ดึงสัญญาณล่าสุดสำหรับสัญลักษณ์ที่ระบุ
-    
-    Args:
-        symbol: สัญลักษณ์คู่สกุลเงิน (เช่น BTCUSDT, ETHUSDT)
-    """
     if symbol not in SYMBOLS:
         raise HTTPException(status_code=404, detail=f"No data for symbol {symbol}")
     
     try:
         if not redis_connected:
-            # ถ้า Redis ไม่เชื่อมต่อ ให้ส่งข้อมูลจำลอง
-            print(f"⚠️ Redis ไม่ได้เชื่อมต่อ - ใช้ข้อมูลจำลองสำหรับ {symbol}")
-            return create_mock_data(symbol)
+            raise HTTPException(status_code=503, detail="Redis service unavailable")
             
-        # ดึงสัญญาณล่าสุดจาก Redis
         latest_signal = redis_client.get(f"latest_signal:{symbol}")
         
         if not latest_signal:
-            print(f"ℹ️ ไม่พบสัญญาณล่าสุดสำหรับ {symbol} - ใช้ข้อมูลจำลอง")
-            return create_mock_data(symbol)
+            return create_empty_signal(symbol)
         
         return json.loads(latest_signal)
     except redis.RedisError as e:
-        print(f"⚠️ เกิดข้อผิดพลาด Redis: {e}")
-        # ใช้ข้อมูลจำลองแทนเมื่อมีข้อผิดพลาด
-        return create_mock_data(symbol)
+        print(f"⚠️ Redis error: {e}")
+        raise HTTPException(status_code=503, detail="Redis service error")
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการดึงสัญญาณล่าสุด: {e}")
+        print(f"❌ Error fetching latest signal: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching latest signal: {str(e)}")
 
 @app.get("/api/history-signals")
 async def get_history_signals(symbol: str = "BTCUSDT", limit: int = 10):
-    """
-    ดึงประวัติสัญญาณสำหรับสัญลักษณ์ที่ระบุ
-    
-    Args:
-        symbol: สัญลักษณ์คู่สกุลเงิน (เช่น BTCUSDT, ETHUSDT)
-        limit: จำนวนสัญญาณล่าสุดที่ต้องการ
-    """
     if symbol not in SYMBOLS:
         raise HTTPException(status_code=404, detail=f"No data for symbol {symbol}")
     
     try:
         if not redis_connected:
-            # ถ้า Redis ไม่เชื่อมต่อ ให้ส่งข้อมูลจำลอง
-            print(f"⚠️ Redis ไม่ได้เชื่อมต่อ - ใช้ข้อมูลประวัติจำลองสำหรับ {symbol}")
-            # สร้างข้อมูลประวัติจำลองย้อนหลัง
-            mock_history = []
-            current_time = datetime.now().timestamp() * 1000
-            for i in range(limit):
-                mock_signal = create_mock_data(symbol)
-                # ปรับเวลาให้ถอยหลังไป
-                mock_signal["timestamp"] = int(current_time) - (i * 120000)  # ถอยหลังทีละ 2 นาที
-                mock_history.append(mock_signal)
-            return mock_history
-        
-        # ดึงประวัติสัญญาณจาก Redis
+            raise HTTPException(status_code=503, detail="Redis service unavailable")
+            
         signals = redis_client.lrange(f"signal_history:{symbol}", 0, limit - 1)
         
         if not signals or len(signals) == 0:
-            print(f"ℹ️ ไม่พบประวัติสัญญาณสำหรับ {symbol} - ใช้ข้อมูลจำลอง")
-            # สร้างข้อมูลประวัติจำลอง
-            mock_history = []
-            current_time = datetime.now().timestamp() * 1000
-            for i in range(limit):
-                mock_signal = create_mock_data(symbol)
-                mock_signal["timestamp"] = int(current_time) - (i * 120000)
-                mock_history.append(mock_signal)
-            return mock_history
+            return []  # Return empty array if no signals found
         
         return [json.loads(signal) for signal in signals]
     except redis.RedisError as e:
-        print(f"⚠️ เกิดข้อผิดพลาด Redis: {e}")
-        # ใช้ข้อมูลจำลองแทน
-        mock_history = []
-        current_time = datetime.now().timestamp() * 1000
-        for i in range(limit):
-            mock_signal = create_mock_data(symbol)
-            mock_signal["timestamp"] = int(current_time) - (i * 120000)
-            mock_history.append(mock_signal)
-        return mock_history
+        print(f"⚠️ Redis error: {e}")
+        raise HTTPException(status_code=503, detail="Redis service error")
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการดึงประวัติสัญญาณ: {e}")
+        print(f"❌ Error fetching signal history: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching signal history: {str(e)}")
 
 @app.get("/available-symbols")
@@ -415,43 +363,56 @@ async def get_available_symbols():
 
 @app.get("/latest-indicators")
 async def get_latest_indicators(symbol: str = "BTCUSDT"):
-    """
-    ดึงค่าตัวชี้วัดล่าสุดสำหรับสัญลักษณ์ที่ระบุ
-    
-    Args:
-        symbol: สัญลักษณ์คู่สกุลเงิน (เช่น BTCUSDT, ETHUSDT)
-    """
     if symbol not in SYMBOLS:
         raise HTTPException(status_code=404, detail=f"No data for symbol {symbol}")
     
     try:
         if not redis_connected:
-            # ถ้า Redis ไม่เชื่อมต่อ ให้ส่งข้อมูลจำลอง
-            mock_data = create_mock_data(symbol)
-            return {"symbol": symbol, "indicators": mock_data["indicators"]}
+            raise HTTPException(status_code=503, detail="Redis service unavailable")
         
-        # ดึงสัญญาณล่าสุดจาก Redis (ซึ่งมีข้อมูลตัวชี้วัด)
         latest_signal = redis_client.get(f"latest_signal:{symbol}")
         
         if not latest_signal:
-            # ถ้าไม่มีข้อมูล ให้ส่งข้อมูลจำลอง
-            mock_data = create_mock_data(symbol)
-            return {"symbol": symbol, "indicators": mock_data["indicators"]}
+            empty = create_empty_signal(symbol)
+            return {"symbol": symbol, "indicators": empty["indicators"]}
         
         signal_data = json.loads(latest_signal)
         
-        # ดึงเฉพาะข้อมูลตัวชี้วัด
         if 'indicators' in signal_data:
             return {"symbol": symbol, "indicators": signal_data['indicators']}
         else:
-            # ถ้าไม่มีข้อมูลตัวชี้วัด ให้ส่งข้อมูลจำลอง
-            mock_data = create_mock_data(symbol)
-            return {"symbol": symbol, "indicators": mock_data["indicators"]}
+            empty = create_empty_signal(symbol)
+            return {"symbol": symbol, "indicators": empty["indicators"]}
+    except redis.RedisError as e:
+        print(f"⚠️ Redis error: {e}")
+        raise HTTPException(status_code=503, detail="Redis service error")
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการดึงตัวชี้วัดล่าสุด: {e}")
-        # ส่งข้อมูลจำลองเมื่อมีข้อผิดพลาด
-        mock_data = create_mock_data(symbol)
-        return {"symbol": symbol, "indicators": mock_data["indicators"]}
+        print(f"❌ Error fetching latest indicators: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching latest indicators: {str(e)}")
+
+# ฟังก์ชันสำหรับส่ง heartbeat ให้ client อย่างสม่ำเสมอ (ไม่ได้ใช้ในเวอร์ชันนี้)
+# async def send_heartbeat(websocket: WebSocket, interval: int = 30):
+#     """
+#     ฟังก์ชันสำหรับส่ง heartbeat ไปยัง WebSocket client เพื่อตรวจสอบว่าการเชื่อมต่อยังคงใช้งานได้
+#     
+#     Args:
+#         websocket: WebSocket connection
+#         interval: ช่วงเวลาในการส่ง heartbeat (วินาที)
+#     """
+#     try:
+#         while True:
+#             await asyncio.sleep(interval)
+#             try:
+#                 await websocket.send_json({
+#                     "type": "ping",
+#                     "timestamp": int(datetime.now().timestamp())
+#                 })
+#             except Exception:
+#                 # หากไม่สามารถส่งได้ ให้ถือว่า WebSocket ถูกตัดการเชื่อมต่อ
+#                 break
+#     except asyncio.CancelledError:
+#         # ยกเลิกอย่างสง่างาม
+#         pass
 
 @app.websocket("/ws/signals")
 async def websocket_endpoint(websocket: WebSocket):
@@ -494,7 +455,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     if latest_signal:
                                         await manager.send_to_client(websocket, json.loads(latest_signal))
                                     else:
-                                        mock_data = create_mock_data(symbol)
+                                        mock_data = create_empty_signal(symbol)
                                         await manager.send_to_client(websocket, mock_data)
                                 except WebSocketDisconnect:
                                     raise
@@ -531,6 +492,252 @@ async def websocket_endpoint(websocket: WebSocket):
         # ตรวจสอบว่า websocket ยังอยู่ในรายการ active_connections หรือไม่ก่อนเรียก disconnect
         if websocket in manager.active_connections:
             manager.disconnect(websocket)
+
+@app.websocket("/ws/depth/{symbol}")
+async def depth_websocket_endpoint(websocket: WebSocket, symbol: str):
+    """
+    WebSocket endpoint สำหรับข้อมูล orderbook depth ของสัญลักษณ์ที่ระบุ
+    - ส่งข้อมูล mock ในอัตรา 1 ครั้ง/วินาที เพื่อให้ frontend สามารถทำงานได้ระหว่างการแก้ไข
+    """
+    try:
+        # ยอมรับการเชื่อมต่อ
+        await websocket.accept()
+        print(f"WebSocket connection accepted for depth/{symbol}")
+        
+        # ตรวจสอบว่าสัญลักษณ์นี้สนับสนุนหรือไม่
+        if symbol.upper() not in SYMBOLS:
+            await websocket.send_json({
+                "error": f"Symbol {symbol} not supported. Available symbols are: {', '.join(SYMBOLS)}"
+            })
+            await websocket.close()
+            return
+        
+        try:
+            # ส่งข้อมูลจำลองทุกวินาที
+            while True:
+                try:
+                    # สร้างข้อมูลจำลอง
+                    mock_data = {
+                        "symbol": symbol.upper(),
+                        "lastUpdateId": int(datetime.now().timestamp() * 1000),
+                        "bids": [
+                            [str(30000 - i * 10), str(1.0 / (i + 1))] for i in range(5)
+                        ],
+                        "asks": [
+                            [str(30000 + i * 10), str(1.0 / (i + 1))] for i in range(5)
+                        ],
+                        "timestamp": int(datetime.now().timestamp() * 1000)
+                    }
+                    
+                    # ส่งข้อมูลไปยัง client
+                    await websocket.send_json(mock_data)
+                    
+                    # รอดูว่ามีข้อความจาก client หรือไม่
+                    try:
+                        client_msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
+                        try:
+                            client_data = json.loads(client_msg)
+                            if client_data.get('type') == 'pong':
+                                print(f"Received pong from client for depth/{symbol}")
+                        except json.JSONDecodeError:
+                            pass
+                    except asyncio.TimeoutError:
+                        pass
+                    
+                    # รอ 1 วินาทีก่อนส่งข้อมูลถัดไป
+                    await asyncio.sleep(1.0)
+                    
+                except asyncio.CancelledError:
+                    print(f"Task for depth/{symbol} was cancelled")
+                    break
+                    
+        except WebSocketDisconnect:
+            print(f"WebSocket client for depth/{symbol} disconnected")
+        except Exception as e:
+            print(f"Error handling depth WebSocket for {symbol}: {e}")
+            
+    except Exception as e:
+        print(f"Error in depth WebSocket endpoint for {symbol}: {e}")
+        try:
+            await websocket.close()
+        except:
+            pass
+
+@app.websocket("/ws/trades/{symbol}")
+async def trades_websocket_endpoint(websocket: WebSocket, symbol: str):
+    """
+    WebSocket endpoint สำหรับข้อมูลการซื้อขายล่าสุดของสัญลักษณ์ที่ระบุ
+    - ส่งข้อมูล mock ทุก 2 วินาทีเพื่อให้ frontend สามารถทำงานได้ระหว่างการแก้ไข
+    """
+    try:
+        # ยอมรับการเชื่อมต่อ
+        await websocket.accept()
+        print(f"WebSocket connection accepted for trades/{symbol}")
+        
+        # ตรวจสอบว่าสัญลักษณ์นี้สนับสนุนหรือไม่
+        if symbol.upper() not in SYMBOLS:
+            await websocket.send_json({
+                "error": f"Symbol {symbol} not supported. Available symbols are: {', '.join(SYMBOLS)}"
+            })
+            await websocket.close()
+            return
+        
+        try:
+            import random
+            
+            # ส่งข้อมูลจำลองทุก 2 วินาที
+            while True:
+                try:
+                    # กำหนดราคาพื้นฐาน (สมมติว่าเป็นราคา Bitcoin)
+                    base_price = 30000 + random.randint(-50, 50)
+                    
+                    # สร้างข้อมูลการซื้อขายจำลอง
+                    is_buyer_maker = random.choice([True, False])
+                    mock_trade = {
+                        "e": "trade",
+                        "E": int(datetime.now().timestamp() * 1000),
+                        "s": symbol.upper(),
+                        "t": int(datetime.now().timestamp() * 1000000),
+                        "p": str(base_price),
+                        "q": str(round(random.uniform(0.001, 0.1), 6)),
+                        "b": 123456,
+                        "a": 123457,
+                        "T": int(datetime.now().timestamp() * 1000),
+                        "m": is_buyer_maker,
+                        "M": True
+                    }
+                    
+                    # ส่งข้อมูลไปยัง client
+                    await websocket.send_json(mock_trade)
+                    
+                    # รอ 2 วินาทีก่อนส่งข้อมูลถัดไป
+                    await asyncio.sleep(2.0)
+                    
+                except asyncio.CancelledError:
+                    print(f"Task for trades/{symbol} was cancelled")
+                    break
+                    
+        except WebSocketDisconnect:
+            print(f"WebSocket client for trades/{symbol} disconnected")
+        except Exception as e:
+            print(f"Error handling trades WebSocket for {symbol}: {e}")
+            
+    except Exception as e:
+        print(f"Error in trades WebSocket endpoint for {symbol}: {e}")
+        try:
+            await websocket.close()
+        except:
+            pass
+
+@app.websocket("/ws/kline/{symbol}")
+async def kline_websocket_endpoint(websocket: WebSocket, symbol: str):
+    """
+    WebSocket endpoint สำหรับข้อมูล kline (แท่งเทียน) ของสัญลักษณ์ที่ระบุ
+    - ส่งข้อมูล mock ทุก 1 นาทีเพื่อให้ frontend สามารถทำงานได้ระหว่างการแก้ไข
+    """
+    try:
+        # ยอมรับการเชื่อมต่อ
+        await websocket.accept()
+        print(f"WebSocket connection accepted for kline/{symbol}")
+        
+        # ตรวจสอบว่าสัญลักษณ์นี้สนับสนุนหรือไม่
+        if symbol.upper() not in SYMBOLS:
+            await websocket.send_json({
+                "error": f"Symbol {symbol} not supported. Available symbols are: {', '.join(SYMBOLS)}"
+            })
+            await websocket.close()
+            return
+        
+        import random
+        
+        # กำหนดราคาเริ่มต้นและสร้างชุดข้อมูลประวัติ
+        base_price = 30000
+        current_time = int(datetime.now().timestamp() * 1000) - (60 * 60 * 1000)  # 1 ชั่วโมงก่อน
+        interval = 60 * 1000  # 1 นาที
+        
+        # สร้างข้อมูลประวัติย้อนหลัง 60 แท่ง
+        historical_data = []
+        for i in range(60):
+            price_change = random.uniform(-100, 100)
+            open_price = base_price + price_change
+            close_price = open_price + random.uniform(-50, 50)
+            high_price = max(open_price, close_price) + random.uniform(5, 20)
+            low_price = min(open_price, close_price) - random.uniform(5, 20)
+            volume = random.uniform(5, 20)
+            
+            candle = {
+                "timestamp": current_time + (i * interval),
+                "open": str(open_price),
+                "high": str(high_price),
+                "low": str(low_price),
+                "close": str(close_price),
+                "volume": str(volume)
+            }
+            historical_data.append(candle)
+            base_price = float(close_price)
+        
+        # ส่งข้อมูลประวัติไปยัง client
+        await websocket.send_json({
+            "type": "kline_history",
+            "symbol": symbol.upper(),
+            "data": historical_data
+        })
+        
+        # สถานะล่าสุด
+        latest_price = float(historical_data[-1]["close"])
+        latest_timestamp = historical_data[-1]["timestamp"]
+        
+        try:
+            # ส่งข้อมูลใหม่ทุก 1 นาที
+            while True:
+                try:
+                    # อัพเดทเวลาและราคา
+                    latest_timestamp += interval
+                    price_change = random.uniform(-50, 50)
+                    open_price = latest_price
+                    close_price = open_price + price_change
+                    high_price = max(open_price, close_price) + random.uniform(5, 20)
+                    low_price = min(open_price, close_price) - random.uniform(5, 20)
+                    volume = random.uniform(5, 20)
+                    
+                    # สร้างข้อมูล kline ใหม่
+                    new_candle = {
+                        "timestamp": latest_timestamp,
+                        "open": str(open_price),
+                        "high": str(high_price),
+                        "low": str(low_price),
+                        "close": str(close_price),
+                        "volume": str(volume)
+                    }
+                    
+                    # ส่งข้อมูลไปยัง client
+                    await websocket.send_json({
+                        "type": "kline",
+                        "symbol": symbol.upper(),
+                        "data": new_candle
+                    })
+                    
+                    # อัพเดทราคาล่าสุด
+                    latest_price = close_price
+                    
+                    # รอ 5 วินาทีในการพัฒนา (จริง ๆ ควรเป็น 1 นาที)
+                    await asyncio.sleep(5.0)
+                    
+                except asyncio.CancelledError:
+                    print(f"Task for kline/{symbol} was cancelled")
+                    break
+                    
+        except WebSocketDisconnect:
+            print(f"WebSocket client for kline/{symbol} disconnected")
+        except Exception as e:
+            print(f"Error handling kline WebSocket for {symbol}: {e}")
+            
+    except Exception as e:
+        print(f"Error in kline WebSocket endpoint for {symbol}: {e}")
+        try:
+            await websocket.close()
+        except:
+            pass
 
 # ฟังก์ชันเริ่มต้น Binance WebSocket Client ในพื้นหลัง
 async def start_binance_client():

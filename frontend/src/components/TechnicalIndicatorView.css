@@ -1,0 +1,96 @@
+.technical-indicator-view {
+  background-color: #1E1E1E;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  color: #D9D9D9;
+  margin-bottom: 20px;
+  overflow: hidden;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.indicator-section {
+  background-color: #262626;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.indicator-section h4 {
+  margin-top: 0;
+  margin-bottom: 16px;
+  color: #D9D9D9;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.indicator-chart {
+  background-color: #1A1A1A;
+  border-radius: 4px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.indicator-chart canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.indicator-info p {
+  margin-top: 0;
+  margin-bottom: 10px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #B9B9B9;
+}
+
+.indicator-info ul {
+  padding-left: 20px;
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.indicator-info li {
+  margin-bottom: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #B9B9B9;
+}
+
+/* เพิ่มสีสำหรับแยกแยะข้อมูลต่างๆ */
+.indicator-info .danger {
+  color: #ef5350;
+  font-weight: 500;
+}
+
+.indicator-info .success {
+  color: #26a69a;
+  font-weight: 500;
+}
+
+.indicator-info .primary {
+  color: #2196F3;
+  font-weight: 500;
+}
+
+.indicator-info .warning {
+  color: #FF9800;
+  font-weight: 500;
+}
+
+/* รองรับการแสดงผลบนอุปกรณ์มือถือ */
+@media (max-width: 768px) {
+  .indicator-chart canvas {
+    height: 150px;
+  }
+  
+  .indicator-info p {
+    font-size: 13px;
+  }
+  
+  .indicator-info li {
+    font-size: 13px;
+  }
+}

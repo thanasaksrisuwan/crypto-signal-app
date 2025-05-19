@@ -7,12 +7,17 @@ const SignalHistory = ({ symbol, settings }) => {
   const [signalHistory, setSignalHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   
+  // กำหนด API Base URL
+  const API_BASE = process.env.NODE_ENV === 'production' 
+    ? window.location.origin 
+    : 'http://localhost:8000';
+  
   // โหลดประวัติสัญญาณเมื่อคอมโพเนนต์เริ่มต้นหรือเมื่อสัญลักษณ์เปลี่ยน
   useEffect(() => {
     const fetchHistory = async () => {
       setLoading(true);
       try {
-        const response = await axios.get(`/history-signals?symbol=${symbol}&limit=20`);
+        const response = await axios.get(`${API_BASE}/api/history-signals?symbol=${symbol}&limit=20`);
         if (Array.isArray(response.data)) {
           setSignalHistory(response.data);
         } else {

@@ -4,6 +4,7 @@ import SignalDashboard from './components/SignalDashboard';
 import SignalHistory from './components/SignalHistory';
 import UserSettings from './components/UserSettings';
 import Header from './components/Header';
+import MarketData from './components/MarketData';
 
 function App() {
   // สถานะสำหรับสัญลักษณ์ที่เลือกปัจจุบัน
@@ -48,8 +49,7 @@ function App() {
   const handleSymbolChange = (symbol) => {
     setSelectedSymbol(symbol);
   };
-  
-  return (
+    return (
     <div className="App">
       <Header 
         selectedSymbol={selectedSymbol} 
@@ -57,22 +57,32 @@ function App() {
       />
       
       <div className="dashboard-container">
-        <div className="main-content">
-          <SignalDashboard 
+        {/* Add MarketData as a full-width component at the top */}
+        <div className="chart-section">
+          <MarketData 
             symbol={selectedSymbol}
-            settings={userSettings}
-          />
-          <SignalHistory 
-            symbol={selectedSymbol} 
             settings={userSettings}
           />
         </div>
         
-        <div className="sidebar">
-          <UserSettings 
-            settings={userSettings}
-            onSettingsChange={handleSettingsChange}
-          />
+        <div className="dashboard-content">
+          <div className="main-content">
+            <SignalDashboard 
+              symbol={selectedSymbol}
+              settings={userSettings}
+            />
+            <SignalHistory 
+              symbol={selectedSymbol} 
+              settings={userSettings}
+            />
+          </div>
+          
+          <div className="sidebar">
+            <UserSettings 
+              settings={userSettings}
+              onSettingsChange={handleSettingsChange}
+            />
+          </div>
         </div>
       </div>
     </div>

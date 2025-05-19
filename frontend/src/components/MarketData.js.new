@@ -1,0 +1,1081 @@
+import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { createChart, LineStyle, CrosshairMode, CandlestickSeries, LineSeries, HistogramSeries } from 'lightweight-charts';
+import './MarketData.css';
+
+/**
+ * คอมโพเนนต์สำหรับแสดงข้อมูลตลาดแบบเรียลไทม์คล้าย TradingView
+ * @param {Object} props - พารามิเตอร์ของคอมโพเนนต์
+ * @param {string} props.symbol - สัญลักษณ์คู่เทรดปัจจุบัน
+ * @param {Object} props.settings - การตั้งค่าผู้ใช้
+ */
+const MarketData = ({ symbol, settings }) => {
+  // อ้างอิงถึงคอนเทนเนอร์ของกราฟและพาเนลต่างๆ
+  const chartContainerRef = useRef(null);
+  const orderbookContainerRef = useRef(null);
+  
+  // สถานะสำหรับอ็อบเจ็คต์กราฟและซีรีส์ข้อมูล
+  const [chart, setChart] = useState(null);
+  const [candlestickSeries, setCandlestickSeries] = useState(null);
+  const [volumeSeries, setVolumeSeries] = useState(null);
+  const [technicalSeries, setTechnicalSeries] = useState({
+    ema9: null,
+    ema21: null,
+    sma50: null,
+    sma200: null,
+    rsi: null,
+    macd: null,
+    volume: null,
+  });
+  
+  // สถานะสำหรับช่วงเวลาที่แสดงปัจจุบัน
+  const [timeframe, setTimeframe] = useState('1h');
+  
+  // สถานะสำหรับข้อมูลตลาด
+  const [candleData, setCandleData] = useState([]);
+  const [volumeData, setVolumeData] = useState([]);
+  const [orderbookData, setOrderbookData] = useState({
+    bids: [],  // คำสั่งซื้อ [ราคา, ปริมาณ]
+    asks: [],  // คำสั่งขาย [ราคา, ปริมาณ]
+    lastUpdateId: 0,
+  });
+  const [recentTrades, setRecentTrades] = useState([]);
+  
+  // สถานะสำหรับตัวบ่งชี้ทางเทคนิค
+  const [visibleIndicators, setVisibleIndicators] = useState({
+    ema9: true,
+    ema21: true,
+    sma50: false,
+    sma200: false,
+    volume: true,
+    rsi: false,
+    macd: false,
+    bollingerBands: false,
+  });
+  
+  // สถานะสำหรับเครื่องมือวาด
+  const [drawingMode, setDrawingMode] = useState(null);  // line, horizontalLine, rectangle, fibonacciRetracement
+  const [drawings, setDrawings] = useState([]);
+  
+  // สถานะสำหรับแสดงผลในรูปแบบต่างๆ
+  const [chartType, setChartType] = useState('candlestick');  // candlestick, line, bar
+  const [chartLayout, setChartLayout] = useState('standard');  // standard, split
+  
+  // สถานะสำหรับจัดการการโหลดข้อมูลและข้อผิดพลาด
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+  
+  // กำหนด API Base URL
+  const API_BASE = process.env.NODE_ENV === 'production' 
+    ? window.location.origin 
+    : 'http://localhost:8000';
+  
+  // กำหนด WebSocket Base URL
+  const WS_BASE = process.env.NODE_ENV === 'production'
+    ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
+    : 'ws://localhost:8000';
+  
+  // สร้าง WebSocket references สำหรับการเชื่อมต่อต่างๆ
+  const wsRef = useRef(null);        // สำหรับข้อมูลแท่งเทียน (kline)
+  const depthWsRef = useRef(null);   // สำหรับข้อมูล order book
+  const tradesWsRef = useRef(null);  // สำหรับข้อมูลการเทรดล่าสุด
+    /**
+   * สร้างกราฟและเริ่มการเชื่อมต่อ WebSocket
+   * ทำงานเมื่อคอมโพเนนต์ถูกโหลดหรือขนาดหน้าจอเปลี่ยนแปลง
+   */
+  useEffect(() => {
+    if (!chartContainerRef.current) return;
+    
+    // สร้างกราฟใหม่ด้วยการตั้งค่าเพิ่มเติมเพื่อให้เหมือน TradingView มากขึ้น
+    const newChart = createChart(chartContainerRef.current, {
+      width: chartContainerRef.current.clientWidth,
+      height: 500,
+      layout: {
+        background: { color: '#1E1E1E' },
+        textColor: '#D9D9D9',
+        fontSize: 12,
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+      },
+      grid: {
+        vertLines: { color: '#2B2B43', style: LineStyle.Dotted },
+        horzLines: { color: '#2B2B43', style: LineStyle.Dotted },
+      },
+      rightPriceScale: {
+        borderColor: '#2B2B43',
+        scaleMargins: {
+          top: 0.1,
+          bottom: 0.2,
+        },
+      },
+      timeScale: {
+        borderColor: '#2B2B43',
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: (time) => {
+          const date = new Date(time * 1000);
+          return date.getHours() + ':' + (date.getMinutes() < 10 ? '0' + date.getMinutes() : date.getMinutes());
+        },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: {
+          color: '#758696',
+          width: 1,
+          style: LineStyle.Solid,
+          labelBackgroundColor: '#758696',
+        },
+        horzLine: {
+          color: '#758696',
+          width: 1,
+          style: LineStyle.Solid,
+          labelBackgroundColor: '#758696',
+        },
+      },
+      handleScroll: {
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: {
+          time: true,
+          price: true,
+        },
+      },
+    });    // กำหนดกราฟแท่งเทียนให้มีความสวยงามและอ่านง่าย
+    const newCandlestickSeries = newChart.addSeries({
+      type: 'Candlestick',
+      upColor: '#26a69a',
+      downColor: '#ef5350',
+      borderVisible: false,
+      wickUpColor: '#26a69a',
+      wickDownColor: '#ef5350',
+      priceFormat: {
+        type: 'price',
+        precision: 2,
+        minMove: 0.01,
+      },
+    });    // เพิ่มซีรีส์ปริมาณการซื้อขายในพื้นที่แยกต่างหาก
+    const newVolumeSeries = newChart.addSeries({
+      type: 'Histogram',
+      color: '#26a69a',
+      priceFormat: {
+        type: 'volume',
+      },
+      priceScaleId: 'volume',
+      scaleMargins: {
+        top: 0.8,
+        bottom: 0,
+      },
+    });
+      // เพิ่มซีรีส์สำหรับตัวบ่งชี้ทางเทคนิค    // EMA 9 (Exponential Moving Average 9 วัน)
+    const ema9Series = newChart.addSeries({
+      type: 'Line',
+      color: '#2196F3',
+      lineWidth: 1,
+      crosshairMarkerVisible: false,
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
+    
+    // EMA 21 (Exponential Moving Average 21 วัน)    const ema21Series = newChart.createLineSeries({
+      color: '#FF9800',
+      lineWidth: 1,
+      crosshairMarkerVisible: false,
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
+      // SMA 50 (Simple Moving Average 50 วัน)
+    const sma50Series = newChart.createLineSeries({
+      color: '#7E57C2',
+      lineWidth: 1,
+      crosshairMarkerVisible: false,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      visible: false, // เริ่มต้นปิดไว้ก่อน
+    });
+    
+    // SMA 200 (Simple Moving Average 200 วัน)
+    const sma200Series = newChart.addLineSeries({
+      color: '#FFC107',
+      lineWidth: 1,
+      crosshairMarkerVisible: false,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      visible: false, // เริ่มต้นปิดไว้ก่อน
+    });
+    
+    // บันทึกอ็อบเจ็คต์กราฟและซีรีส์ข้อมูลทั้งหมด
+    setChart(newChart);
+    setCandlestickSeries(newCandlestickSeries);
+    setVolumeSeries(newVolumeSeries);
+    setTechnicalSeries(prevState => ({
+      ...prevState,
+      ema9: ema9Series,
+      ema21: ema21Series,
+      sma50: sma50Series,
+      sma200: sma200Series,
+    }));
+    
+    // ปรับขนาดกราฟเมื่อหน้าต่างเปลี่ยนขนาด
+    const handleResize = () => {
+      if (newChart) {
+        newChart.applyOptions({
+          width: chartContainerRef.current.clientWidth,
+        });
+      }
+    };
+    
+    // เพิ่มการรับฟังเหตุการณ์การปรับขนาดหน้าต่าง
+    window.addEventListener('resize', handleResize);
+    
+    // ทำความสะอาดเมื่อ component ถูก unmount
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (newChart) {
+        newChart.remove();
+      }
+      
+      // ปิด WebSocket ทั้งหมดถ้ายังเปิดอยู่
+      [wsRef.current, depthWsRef.current, tradesWsRef.current].forEach(ws => {
+        if (ws) ws.close();
+      });
+    };
+  }, []);
+  
+  /**
+   * ดึงข้อมูลประวัติ (historical data) และเชื่อมต่อ WebSocket เมื่อสัญลักษณ์หรือช่วงเวลาเปลี่ยน
+   */
+  useEffect(() => {
+    if (!candlestickSeries || !volumeSeries || !symbol || !timeframe) return;
+    
+    // ฟังก์ชันสำหรับดึงข้อมูลประวัติแบบแท่งเทียน
+    const fetchHistoricalData = async () => {
+      try {
+        setIsLoading(true);
+        setError(null);
+        
+        // ร้องขอข้อมูลประวัติจาก API
+        const response = await fetch(`${API_BASE}/api/historical-klines?symbol=${symbol}&interval=${timeframe}&limit=500`);
+        
+        if (!response.ok) {
+          throw new Error(`ไม่สามารถดึงข้อมูลได้: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+    // แปลงข้อมูลเป็นรูปแบบที่ lightweight-charts ใช้ได้
+        const formattedCandleData = data.map(item => ({
+          time: item.time / 1000, // แปลงเวลาจาก milliseconds เป็น seconds
+          open: parseFloat(item.open),
+          high: parseFloat(item.high),
+          low: parseFloat(item.low),
+          close: parseFloat(item.close),
+        }));
+        
+        const formattedVolumeData = data.map(item => ({
+          time: item.time / 1000,
+          value: parseFloat(item.volume),
+          color: parseFloat(item.close) >= parseFloat(item.open) ? '#26a69a' : '#ef5350',
+        }));
+        
+        // อัปเดตสถานะ
+        setCandleData(formattedCandleData);
+        setVolumeData(formattedVolumeData);
+        
+        // แสดงข้อมูลบนกราฟ
+        candlestickSeries.setData(formattedCandleData);
+        volumeSeries.setData(formattedVolumeData);
+        
+        // คำนวณตัวบ่งชี้ EMA9 (9-day Exponential Moving Average)
+        if (technicalSeries.ema9 && visibleIndicators.ema9) {
+          const ema9Data = calculateEMA(formattedCandleData, 9);
+          technicalSeries.ema9.setData(ema9Data);
+        }
+        
+        // คำนวณตัวบ่งชี้ EMA21 (21-day Exponential Moving Average)
+        if (technicalSeries.ema21 && visibleIndicators.ema21) {
+          const ema21Data = calculateEMA(formattedCandleData, 21);
+          technicalSeries.ema21.setData(ema21Data);
+        }
+        
+        // คำนวณตัวบ่งชี้ SMA50 (50-day Simple Moving Average)
+        if (technicalSeries.sma50 && visibleIndicators.sma50) {
+          const sma50Data = calculateSMA(formattedCandleData, 50);
+          technicalSeries.sma50.setData(sma50Data);
+        }
+        
+        // คำนวณตัวบ่งชี้ SMA200 (200-day Simple Moving Average)
+        if (technicalSeries.sma200 && visibleIndicators.sma200) {
+          const sma200Data = calculateSMA(formattedCandleData, 200);
+          technicalSeries.sma200.setData(sma200Data);
+        }
+        
+        // เชื่อมต่อ WebSockets สำหรับข้อมูลเรียลไทม์
+        connectKlineWebSocket();
+        connectOrderbookWebSocket();
+        connectTradesWebSocket();
+        
+        setIsLoading(false);
+      } catch (err) {
+        console.error('เกิดข้อผิดพลาดในการดึงข้อมูล:', err);
+        setError(`ไม่สามารถโหลดข้อมูลได้: ${err.message}`);
+        setIsLoading(false);
+      }
+    };
+    
+    // เรียกฟังก์ชันดึงข้อมูล
+    fetchHistoricalData();
+    
+    // ยกเลิกการเชื่อมต่อ WebSocket เมื่อ component ถูก unmount หรือเมื่อสัญลักษณ์เปลี่ยน
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [symbol, timeframe, candlestickSeries, volumeSeries]);
+    /**
+   * คำนวณค่า EMA (Exponential Moving Average)
+   * @param {Array} data - ข้อมูลแท่งเทียน
+   * @param {number} period - จำนวนวันที่ใช้ในการคำนวณ
+   * @returns {Array} - ข้อมูล EMA ที่คำนวณแล้ว
+   */
+  const calculateEMA = useCallback((data, period) => {
+    if (!data || data.length < period) return [];
+    
+    const k = 2 / (period + 1);
+    let emaData = [];
+    let sum = 0;
+    
+    // คำนวณ SMA แรกเป็นค่าเริ่มต้น
+    for (let i = 0; i < period; i++) {
+      sum += data[i].close;
+    }
+    
+    let ema = sum / period;
+    
+    // เพิ่มค่า EMA แรกที่คำนวณจาก SMA
+    emaData.push({
+      time: data[period - 1].time,
+      value: ema
+    });
+    
+    // คำนวณ EMA ที่เหลือ
+    for (let i = period; i < data.length; i++) {
+      ema = (data[i].close - ema) * k + ema;
+      emaData.push({
+        time: data[i].time,
+        value: ema
+      });
+    }
+    
+    return emaData;
+  }, []);
+  
+  /**
+   * คำนวณค่า SMA (Simple Moving Average)
+   * @param {Array} data - ข้อมูลแท่งเทียน
+   * @param {number} period - จำนวนวันที่ใช้ในการคำนวณ
+   * @returns {Array} - ข้อมูล SMA ที่คำนวณแล้ว
+   */
+  const calculateSMA = useCallback((data, period) => {
+    if (!data || data.length < period) return [];
+    
+    let smaData = [];
+    
+    for (let i = period - 1; i < data.length; i++) {
+      let sum = 0;
+      for (let j = 0; j < period; j++) {
+        sum += data[i - j].close;
+      }
+      
+      smaData.push({
+        time: data[i].time,
+        value: sum / period
+      });
+    }
+    
+    return smaData;
+  }, []);
+
+  /**
+   * เชื่อมต่อ WebSocket สำหรับข้อมูลแท่งเทียนเรียลไทม์
+   */
+  const connectKlineWebSocket = useCallback(() => {
+    // ปิดการเชื่อมต่อเดิมถ้ามี
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    
+    // กำหนด URL สำหรับ WebSocket
+    const wsUrl = `${WS_BASE}/ws/kline/${symbol.toLowerCase()}@kline_${timeframe}`;
+    
+    // สร้างการเชื่อมต่อใหม่
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+    
+    // จัดการเหตุการณ์เมื่อเปิดการเชื่อมต่อ
+    ws.onopen = () => {
+      console.log(`Kline WebSocket connected: ${wsUrl}`);
+    };
+    
+    // จัดการเหตุการณ์เมื่อได้รับข้อมูล
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        
+        // อัปเดตข้อมูลแท่งเทียนและปริมาณการซื้อขาย
+        if (message.k) {
+          const kline = message.k;
+          
+          // สร้างข้อมูลแท่งเทียนใหม่
+          const newCandle = {
+            time: kline.t / 1000,
+            open: parseFloat(kline.o),
+            high: parseFloat(kline.h),
+            low: parseFloat(kline.l),
+            close: parseFloat(kline.c),
+          };
+          
+          // สร้างข้อมูลปริมาณใหม่
+          const newVolume = {
+            time: kline.t / 1000,
+            value: parseFloat(kline.v),
+            color: parseFloat(kline.c) >= parseFloat(kline.o) ? '#26a69a' : '#ef5350',
+          };
+          
+          // อัปเดตข้อมูลบนกราฟ
+          if (candlestickSeries && volumeSeries) {
+            candlestickSeries.update(newCandle);
+            volumeSeries.update(newVolume);
+            
+            // อัปเดตข้อมูลตัวบ่งชี้ real-time
+            updateTechnicalIndicators(newCandle);
+          }
+          
+          // อัปเดตสถานะข้อมูลล่าสุด
+          setCandleData(prevData => {
+            const lastIndex = prevData.findIndex(candle => candle.time === newCandle.time);
+            if (lastIndex >= 0) {
+              const newData = [...prevData];
+              newData[lastIndex] = newCandle;
+              return newData;
+            } else {
+              return [...prevData, newCandle];
+            }
+          });
+        }
+      } catch (err) {
+        console.error('Error processing kline WebSocket message:', err);
+      }
+    };
+    
+    // จัดการเหตุการณ์ข้อผิดพลาด
+    ws.onerror = (error) => {
+      console.error('Kline WebSocket error:', error);
+      setError('เกิดข้อผิดพลาดในการเชื่อมต่อ WebSocket สำหรับข้อมูลแท่งเทียน');
+    };
+    
+    // จัดการเหตุการณ์เมื่อปิดการเชื่อมต่อ
+    ws.onclose = (event) => {
+      console.log(`Kline WebSocket closed: ${event.code} ${event.reason}`);
+    };
+  }, [symbol, timeframe]);
+  
+  /**
+   * เชื่อมต่อ WebSocket สำหรับข้อมูล Order Book เรียลไทม์
+   */
+  const connectOrderbookWebSocket = useCallback(() => {
+    // ปิดการเชื่อมต่อเดิมถ้ามี
+    if (depthWsRef.current) {
+      depthWsRef.current.close();
+    }
+    
+    try {
+      // กำหนด URL สำหรับ WebSocket
+      const wsUrl = `${WS_BASE}/ws/depth/${symbol.toLowerCase()}@depth`;
+      
+      // สร้างการเชื่อมต่อใหม่
+      const ws = new WebSocket(wsUrl);
+      depthWsRef.current = ws;
+      
+      // จัดการเหตุการณ์เมื่อเปิดการเชื่อมต่อ
+      ws.onopen = () => {
+        console.log(`Orderbook WebSocket connected: ${wsUrl}`);
+        
+        // ดึงข้อมูล order book snapshot ครั้งแรก
+        fetch(`${API_BASE}/api/depth?symbol=${symbol}&limit=20`)
+          .then(response => response.json())
+          .then(data => {
+            setOrderbookData({
+              lastUpdateId: data.lastUpdateId,
+              bids: data.bids.map(item => [parseFloat(item[0]), parseFloat(item[1])]),
+              asks: data.asks.map(item => [parseFloat(item[0]), parseFloat(item[1])]),
+            });
+          })
+          .catch(err => {
+            console.error('Error fetching orderbook snapshot:', err);
+          });
+      };
+      
+      // จัดการเหตุการณ์เมื่อได้รับข้อมูล
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          
+          setOrderbookData(prevData => {
+            // อัปเดตคำสั่งซื้อ (bids)
+            const updatedBids = [...prevData.bids];
+            if (message.b) {
+              message.b.forEach(bid => {
+                const price = parseFloat(bid[0]);
+                const quantity = parseFloat(bid[1]);
+                const index = updatedBids.findIndex(item => item[0] === price);
+                
+                if (quantity === 0) {
+                  // ลบราคาออกถ้าปริมาณเป็น 0
+                  if (index !== -1) {
+                    updatedBids.splice(index, 1);
+                  }
+                } else {
+                  // อัปเดตหรือเพิ่มคำสั่งใหม่
+                  if (index !== -1) {
+                    updatedBids[index] = [price, quantity];
+                  } else {
+                    updatedBids.push([price, quantity]);
+                  }
+                }
+              });
+            }
+            
+            // เรียงคำสั่งซื้อจากมากไปน้อย (ราคาสูงสุดอยู่บน)
+            updatedBids.sort((a, b) => b[0] - a[0]);
+            
+            // อัปเดตคำสั่งขาย (asks)
+            const updatedAsks = [...prevData.asks];
+            if (message.a) {
+              message.a.forEach(ask => {
+                const price = parseFloat(ask[0]);
+                const quantity = parseFloat(ask[1]);
+                const index = updatedAsks.findIndex(item => item[0] === price);
+                
+                if (quantity === 0) {
+                  // ลบราคาออกถ้าปริมาณเป็น 0
+                  if (index !== -1) {
+                    updatedAsks.splice(index, 1);
+                  }
+                } else {
+                  // อัปเดตหรือเพิ่มคำสั่งใหม่
+                  if (index !== -1) {
+                    updatedAsks[index] = [price, quantity];
+                  } else {
+                    updatedAsks.push([price, quantity]);
+                  }
+                }
+              });
+            }
+            
+            // เรียงคำสั่งขายจากน้อยไปมาก (ราคาต่ำสุดอยู่บน)
+            updatedAsks.sort((a, b) => a[0] - b[0]);
+            
+            // จำกัดจำนวนให้แสดงแค่ 20 ระดับ
+            return {
+              lastUpdateId: message.u || prevData.lastUpdateId,
+              bids: updatedBids.slice(0, 20),
+              asks: updatedAsks.slice(0, 20)
+            };
+          });
+        } catch (err) {
+          console.error('Error processing orderbook WebSocket message:', err);
+        }
+      };
+      
+      // จัดการเหตุการณ์ข้อผิดพลาด
+      ws.onerror = (error) => {
+        console.error('Orderbook WebSocket error:', error);
+      };
+      
+      // จัดการเหตุการณ์เมื่อปิดการเชื่อมต่อ
+      ws.onclose = (event) => {
+        console.log(`Orderbook WebSocket closed: ${event.code} ${event.reason}`);
+      };
+    } catch (err) {
+      console.error('Error setting up orderbook WebSocket:', err);
+    }
+  }, [symbol]);
+  
+  /**
+   * เชื่อมต่อ WebSocket สำหรับข้อมูลการเทรดล่าสุด
+   */
+  const connectTradesWebSocket = useCallback(() => {
+    // ปิดการเชื่อมต่อเดิมถ้ามี
+    if (tradesWsRef.current) {
+      tradesWsRef.current.close();
+    }
+    
+    try {
+      // กำหนด URL สำหรับ WebSocket
+      const wsUrl = `${WS_BASE}/ws/trades/${symbol.toLowerCase()}@trade`;
+      
+      // สร้างการเชื่อมต่อใหม่
+      const ws = new WebSocket(wsUrl);
+      tradesWsRef.current = ws;
+      
+      // จัดการเหตุการณ์เมื่อเปิดการเชื่อมต่อ
+      ws.onopen = () => {
+        console.log(`Trades WebSocket connected: ${wsUrl}`);
+      };
+      
+      // จัดการเหตุการณ์เมื่อได้รับข้อมูล
+      ws.onmessage = (event) => {
+        try {
+          const trade = JSON.parse(event.data);
+          
+          // เพิ่มเทรดใหม่ที่ด้านบนและจำกัดจำนวนให้แสดงเพียง 30 รายการล่าสุด
+          setRecentTrades(prev => {
+            const newTrade = {
+              id: trade.t,
+              time: trade.T,
+              price: parseFloat(trade.p),
+              quantity: parseFloat(trade.q),
+              isBuyer: trade.m === false // true = buy (taker bought), false = sell
+            };
+            
+            return [newTrade, ...prev].slice(0, 30);
+          });
+        } catch (err) {
+          console.error('Error processing trades WebSocket message:', err);
+        }
+      };
+      
+      // จัดการเหตุการณ์ข้อผิดพลาด
+      ws.onerror = (error) => {
+        console.error('Trades WebSocket error:', error);
+      };
+      
+      // จัดการเหตุการณ์เมื่อปิดการเชื่อมต่อ
+      ws.onclose = (event) => {
+        console.log(`Trades WebSocket closed: ${event.code} ${event.reason}`);
+      };
+    } catch (err) {
+      console.error('Error setting up trades WebSocket:', err);
+    }
+  }, [symbol]);
+  
+  /**
+   * อัปเดตตัวบ่งชี้ทางเทคนิคแบบเรียลไทม์
+   * @param {Object} newCandle - ข้อมูลแท่งเทียนล่าสุด
+   */
+  const updateTechnicalIndicators = useCallback((newCandle) => {
+    // อัปเดต EMA9 real-time
+    if (technicalSeries.ema9 && visibleIndicators.ema9 && candleData.length > 9) {
+      const ema9Data = calculateEMA([...candleData, newCandle], 9);
+      if (ema9Data.length > 0) {
+        const latestEma9 = ema9Data[ema9Data.length - 1];
+        technicalSeries.ema9.update(latestEma9);
+      }
+    }
+    
+    // อัปเดต EMA21 real-time
+    if (technicalSeries.ema21 && visibleIndicators.ema21 && candleData.length > 21) {
+      const ema21Data = calculateEMA([...candleData, newCandle], 21);
+      if (ema21Data.length > 0) {
+        const latestEma21 = ema21Data[ema21Data.length - 1];
+        technicalSeries.ema21.update(latestEma21);
+      }
+    }
+    
+    // อัปเดตตัวบ่งชี้อื่นๆ เช่น SMA50, SMA200 ฯลฯ เพิ่มที่นี่
+  }, [candleData, technicalSeries, visibleIndicators, calculateEMA]);
+    /**
+   * เปลี่ยนช่วงเวลาที่แสดง
+   * @param {string} newTimeframe - ช่วงเวลาใหม่ (1m, 5m, 15m, 1h, 4h, 1d)
+   */
+  const handleTimeframeChange = (newTimeframe) => {
+    if (timeframe === newTimeframe) return;
+    
+    setTimeframe(newTimeframe);
+    setIsLoading(true);
+    setError(null);
+    
+    // เมื่อเปลี่ยนช่วงเวลา เราจะล้างข้อมูลเก่าและดึงข้อมูลใหม่สำหรับช่วงเวลาที่เลือก
+    // หมายเหตุ: ตัวแปร timeframe จะถูกอัปเดตใน useEffect ที่ติดตามการเปลี่ยนแปลงของ timeframe
+  };
+    /**
+   * สลับการแสดงตัวบ่งชี้ทางเทคนิค
+   * @param {string} indicator - ชื่อตัวบ่งชี้ที่ต้องการสลับ
+   */
+  const toggleIndicator = (indicator) => {
+    setVisibleIndicators(prev => {
+      const newState = { ...prev, [indicator]: !prev[indicator] };
+      
+      // อัปเดตการแสดงผลของตัวบ่งชี้บนกราฟ
+      if (technicalSeries[indicator]) {
+        const isVisible = !prev[indicator]; // ค่าใหม่ที่จะเปลี่ยนเป็น
+        
+        if (isVisible) {
+          // เพิ่มข้อมูลเมื่อเปิดการแสดงผล
+          let data = [];
+          
+          // คำนวณข้อมูลตามประเภทของตัวบ่งชี้
+          switch (indicator) {
+            case 'ema9':
+              data = calculateEMA(candleData, 9);
+              break;
+            case 'ema21':
+              data = calculateEMA(candleData, 21);
+              break;
+            case 'sma50':
+              data = calculateSMA(candleData, 50);
+              break;
+            case 'sma200':
+              data = calculateSMA(candleData, 200);
+              break;
+            default:
+              break;
+          }
+          
+          // เซ็ตข้อมูลใหม่เมื่อเปิดการแสดงผล
+          if (data.length > 0) {
+            technicalSeries[indicator].setData(data);
+          }
+        }
+        
+        // อัปเดตการมองเห็นของซีรีส์
+        technicalSeries[indicator].applyOptions({
+          visible: isVisible
+        });
+      }
+      
+      return newState;
+    });
+  };
+  
+  /**
+   * เปลี่ยนประเภทของกราฟ (แท่งเทียน, เส้น, แท่ง)
+   * @param {string} type - ประเภทของกราฟที่ต้องการเปลี่ยน
+   */
+  const changeChartType = useCallback((type) => {
+    setChartType(type);
+    
+    if (!candlestickSeries) return;
+    
+    switch (type) {
+      case 'line':
+        candlestickSeries.applyOptions({
+          visible: false
+        });        // สร้างกราฟเส้นถ้ายังไม่มี
+        if (!technicalSeries.line) {
+          const lineSeries = chart.createLineSeries({
+            color: '#2196F3',
+            lineWidth: 2,
+          });
+          
+          const lineData = candleData.map(item => ({
+            time: item.time,
+            value: item.close
+          }));
+          
+          lineSeries.setData(lineData);
+          setTechnicalSeries(prev => ({ ...prev, line: lineSeries }));
+        } else {
+          technicalSeries.line.applyOptions({
+            visible: true
+          });
+        }
+        break;
+        
+      case 'bar':
+        candlestickSeries.applyOptions({
+          visible: false
+        });
+        // สร้างกราฟแท่งถ้ายังไม่มี
+        if (!technicalSeries.bar) {
+          const barSeries = chart.addBarSeries({
+            upColor: '#26a69a',
+            downColor: '#ef5350',
+          });
+          
+          barSeries.setData(candleData);
+          setTechnicalSeries(prev => ({ ...prev, bar: barSeries }));
+        } else {
+          technicalSeries.bar.applyOptions({
+            visible: true
+          });
+        }
+        break;
+        
+      case 'candlestick':
+      default:
+        // กลับไปใช้แท่งเทียน
+        candlestickSeries.applyOptions({
+          visible: true
+        });
+        
+        // ซ่อนกราฟประเภทอื่น
+        if (technicalSeries.line) {
+          technicalSeries.line.applyOptions({
+            visible: false
+          });
+        }
+        
+        if (technicalSeries.bar) {
+          technicalSeries.bar.applyOptions({
+            visible: false
+          });
+        }
+        break;
+    }
+  }, [chart, candlestickSeries, candleData, technicalSeries]);
+    return (
+    <div className="market-data-container">
+      <div className="market-data-header">
+        <div className="market-data-title">
+          <h2>{symbol} Market Data</h2>
+        </div>
+        
+        <div className="timeframe-selector">
+          {['1m', '5m', '15m', '1h', '4h', '1d'].map(tf => (
+            <button 
+              key={tf} 
+              className={`timeframe-button ${timeframe === tf ? 'active' : ''}`}
+              onClick={() => handleTimeframeChange(tf)}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
+        
+        <div className="indicator-toggles">
+          <button 
+            className={`indicator-button ${visibleIndicators.ema9 ? 'active' : ''}`}
+            onClick={() => toggleIndicator('ema9')}
+          >
+            EMA9
+          </button>
+          <button 
+            className={`indicator-button ${visibleIndicators.ema21 ? 'active' : ''}`}
+            onClick={() => toggleIndicator('ema21')}
+          >
+            EMA21
+          </button>
+          <button 
+            className={`indicator-button ${visibleIndicators.sma50 ? 'active' : ''}`}
+            onClick={() => toggleIndicator('sma50')}
+          >
+            SMA50
+          </button>
+          <button 
+            className={`indicator-button ${visibleIndicators.sma200 ? 'active' : ''}`}
+            onClick={() => toggleIndicator('sma200')}
+          >
+            SMA200
+          </button>
+        </div>
+        
+        <div className="drawing-tools">
+          <button
+            className={`drawing-tool-button ${chartType === 'candlestick' ? 'active' : ''}`}
+            onClick={() => changeChartType('candlestick')}
+            title="Candlestick Chart"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M8 5v14M8 5v14M16 5v14M16 5v14M5 8h6M13 8h6M5 16h6M13 16h6"/>
+            </svg>
+          </button>
+          <button
+            className={`drawing-tool-button ${chartType === 'line' ? 'active' : ''}`}
+            onClick={() => changeChartType('line')}
+            title="Line Chart"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 12h3l4-8 4 16 3-8h4"/>
+            </svg>
+          </button>
+          <button
+            className={`drawing-tool-button ${chartType === 'bar' ? 'active' : ''}`}
+            onClick={() => changeChartType('bar')}
+            title="Bar Chart"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M8 18V7M12 18V3M16 18v-8"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      
+      <div className="market-data-layout">
+        <div className="chart-panel">
+          {isLoading && (
+            <div className="loading-overlay">
+              <div className="loading-spinner"></div>
+              <p>กำลังโหลดข้อมูลตลาด...</p>
+            </div>
+          )}
+          
+          {error && (
+            <div className="error-message">
+              <p>{error}</p>
+              <button onClick={() => window.location.reload()}>ลองอีกครั้ง</button>
+            </div>
+          )}
+          
+          <div 
+            ref={chartContainerRef} 
+            className="chart-container"
+          ></div>
+        </div>
+        
+        <div className="market-data-sidebar">
+          <div className="orderbook-container">
+            <div className="orderbook-header">
+              <span>Price</span>
+              <span>Amount</span>
+              <span>Total</span>
+            </div>
+            
+            <div className="orderbook-content">
+              {/* Ask (Sell) Orders */}
+              {orderbookData.asks.slice(0, 10).map(([price, amount], index) => (
+                <div key={`ask-${index}`} className="price-level ask-level">
+                  <div className="depth-visualization ask-depth" 
+                       style={{
+                         width: `${Math.min(amount / orderbookData.asks.reduce((max, [_, a]) => Math.max(max, a), 0.1) * 100, 100)}%`,
+                         right: 0
+                       }}>
+                  </div>
+                  <span>{price.toFixed(2)}</span>
+                  <span>{amount.toFixed(4)}</span>
+                  <span>{(price * amount).toFixed(2)}</span>
+                </div>
+              ))}
+              
+              {/* Spread */}
+              {orderbookData.bids.length > 0 && orderbookData.asks.length > 0 && (
+                <div className="price-level spread-level">
+                  <span>
+                    Spread: {((orderbookData.asks[0][0] - orderbookData.bids[0][0]).toFixed(2))} 
+                    ({((orderbookData.asks[0][0] / orderbookData.bids[0][0] - 1) * 100).toFixed(2)}%)
+                  </span>
+                </div>
+              )}
+              
+              {/* Bid (Buy) Orders */}
+              {orderbookData.bids.slice(0, 10).map(([price, amount], index) => (
+                <div key={`bid-${index}`} className="price-level bid-level">
+                  <div className="depth-visualization bid-depth" 
+                       style={{
+                         width: `${Math.min(amount / orderbookData.bids.reduce((max, [_, a]) => Math.max(max, a), 0.1) * 100, 100)}%`,
+                         left: 0
+                       }}>
+                  </div>
+                  <span>{price.toFixed(2)}</span>
+                  <span>{amount.toFixed(4)}</span>
+                  <span>{(price * amount).toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          
+          <div className="market-statistics">
+            <div className="stat-item">
+              <span className="stat-label">Last Price:</span>
+              <span className="stat-value">
+                {candleData.length > 0 ? 
+                  candleData[candleData.length-1].close.toFixed(2) : 
+                  'N/A'}
+              </span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">24h Change:</span>
+              {candleData.length > 0 ? (
+                <span className={`stat-value change-value ${
+                  candleData[candleData.length-1].close > candleData[0].close ? 'positive' : 'negative'
+                }`}>
+                  {`${(((candleData[candleData.length-1].close / candleData[0].close) - 1) * 100).toFixed(2)}%`}
+                </span>
+              ) : (
+                <span className="stat-value">N/A</span>
+              )}
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">24h High:</span>
+              <span className="stat-value">
+                {candleData.length > 0 ? 
+                  Math.max(...candleData.map(c => c.high)).toFixed(2) : 
+                  'N/A'}
+              </span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">24h Low:</span>
+              <span className="stat-value">
+                {candleData.length > 0 ? 
+                  Math.min(...candleData.map(c => c.low)).toFixed(2) : 
+                  'N/A'}
+              </span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">24h Volume:</span>
+              <span className="stat-value">
+                {volumeData.length > 0 ? 
+                  volumeData.reduce((sum, item) => sum + item.value, 0).toFixed(2) : 
+                  'N/A'}
+              </span>
+            </div>
+          </div>
+          
+          <h4>Recent Trades</h4>
+          <div className="recent-trades">
+            {recentTrades.slice(0, 10).map((trade, index) => (
+              <div 
+                key={`trade-${trade.id || index}`} 
+                className={`trade-item ${trade.isBuyer ? 'buy' : 'sell'}`}
+              >
+                <span className="trade-time">
+                  {new Date(trade.time).toLocaleTimeString()}
+                </span>
+                <span className={`trade-price ${trade.isBuyer ? 'positive' : 'negative'}`}>
+                  {trade.price.toFixed(2)}
+                </span>
+                <span className="trade-amount">
+                  {trade.quantity.toFixed(4)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      
+      <div className="additional-tools">
+        <button className="tool-button">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 8v8M8 12h8"/>
+          </svg>
+          Add Indicator
+        </button>
+        <button className="tool-button">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M3 3v18h18"/>
+            <path d="M15 9l-6 6M9 9l6 6"/>
+          </svg>
+          Drawing Tools
+        </button>
+        <button className="tool-button">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <path d="M8 12h8M12 8v8"/>
+          </svg>
+          Full Screen
+        </button>
+        <button className="tool-button">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="1"/>
+            <circle cx="19" cy="12" r="1"/>
+            <circle cx="5" cy="12" r="1"/>
+          </svg>
+          More Options
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default MarketData;

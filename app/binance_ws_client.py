@@ -7,7 +7,6 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Union, Callable, Any
 
-import redis
 from dotenv import load_dotenv
 
 # นำเข้าคลาส InfluxDBStorage
@@ -32,9 +31,18 @@ except (ImportError, ModuleNotFoundError):
             # สร้างคลาสจำลองเพื่อหลีกเลี่ยงข้อผิดพลาด
             class InfluxDBStorage:
                 def __init__(self):
-                    print("คลาส InfluxDBStorage จำลอง - ไม่มีการเชื่อมต่อกับ InfluxDB จริง")
+                    print("Mock InfluxDBStorage - No actual InfluxDB connection")
                 
-                def store_kline_data(self, symbol, data):
+                def store_candle(self, data):
+                    pass
+                
+                def store_trade(self, data):
+                    pass
+                
+                def store_ticker(self, data):
+                    pass
+                
+                def store_depth(self, data):
                     pass
                 
                 def close(self):
@@ -57,611 +65,503 @@ BINANCE_WS_API_ENDPOINT = "wss://ws-api.binance.com:443/ws-api/v3"  # API endpoi
 BINANCE_WS_STREAM_ENDPOINT = "wss://stream.binance.com:9443/ws"     # Stream endpoint
 BINANCE_WS_TESTNET_ENDPOINT = "wss://ws-api.testnet.binance.vision/ws-api/v3"
 
+from .optimized_signal_processor import signal_processor
+from .logger import LoggerFactory, log_execution_time, error_logger, MetricsLogger
 
 class BinanceWebSocketClient:
-    def __init__(self, use_testnet=False):
-        # เชื่อมต่อกับ Redis
-        self.redis_client = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            password=REDIS_PASSWORD,
-            decode_responses=True
-        )
+    def __init__(self, symbols: List[str], callback: Optional[Callable] = None):
+        """Initialize WebSocket client with logging"""
+        self.logger = LoggerFactory.get_logger('binance_ws')
+        self.metrics = MetricsLogger('binance_ws')
         
-        # สร้างอินสแตนซ์ของ InfluxDBStorage ถ้ามี
-        if has_influxdb:
-            try:
-                self.influxdb_storage = InfluxDBStorage()
-            except Exception as e:
-                print(f"ไม่สามารถเชื่อมต่อกับ InfluxDB ได้: {e}")
-                self.influxdb_storage = None
-        else:
-            self.influxdb_storage = None
+        self.symbols = symbols
+        self.callback = callback
+        self.websocket = None
+        try:
+            # ใช้ redis client จาก redis_manager แทนการสร้างใหม่
+            from .redis_manager import get_redis_client
+            self.redis_client = get_redis_client(decode_responses=True)
+            self.logger.info("Redis connection established via connection pool")
+        except Exception as e:
+            self.logger.error(f"Redis connection failed: {e}")
+            error_logger.log_error(e, {'component': 'binance_ws', 'connection': 'redis'})
+            raise
         
-        # ตั้งค่า WebSocket endpoints
-        self.use_testnet = use_testnet
-        self.ws_api_endpoint = BINANCE_WS_TESTNET_ENDPOINT if use_testnet else BINANCE_WS_API_ENDPOINT
-        self.ws_stream_endpoint = BINANCE_WS_STREAM_ENDPOINT
+        # Initialize metrics
+        self.metrics.record_metric('initialization', {
+            'symbols': symbols,
+            'timestamp': datetime.now().isoformat()
+        })
         
-        # WebSocket connections
-        self.api_ws = None       # For API requests
-        self.stream_ws = None    # For data streams
-        self.is_running = False
-        self.pending_requests = {}  # Store callbacks for API requests
-        self.active_streams = {}    # Track active stream subscriptions
-
+        # Reconnection settings
+        self.reconnect_delay = 1.0
+        self.max_reconnect_delay = 60.0
+        self.reconnect_count = 0
+        self.max_reconnect_attempts = 10
+        
+        # Message buffer
+        self.message_buffer = []
+        self.buffer_size = 100
+        self.last_flush_time = time.time()
+        self.flush_interval = 1.0
+        
+    @log_execution_time()
     async def connect(self):
-        """เชื่อมต่อกับ Binance WebSocket API และ Stream"""
-        # ทดสอบการเชื่อมต่อกับ Redis
-        try:
-            self.redis_client.ping()
-            print("เชื่อมต่อกับ Redis สำเร็จ")
-        except redis.ConnectionError:
-            print("ไม่สามารถเชื่อมต่อกับ Redis ได้")
-            return False
-        
-        # เชื่อมต่อกับ WebSocket API
-        try:
-            self.api_ws = await websockets.connect(self.ws_api_endpoint)
-            print(f"เชื่อมต่อกับ Binance WebSocket API สำเร็จ: {self.ws_api_endpoint}")
-            
-            # เริ่ม task สำหรับการรับข้อความจาก API WebSocket
-            asyncio.create_task(self._handle_api_messages())
-            
-            # เชื่อมต่อกับ WebSocket Stream
-            self.stream_ws = await websockets.connect(self.ws_stream_endpoint)
-            print(f"เชื่อมต่อกับ Binance WebSocket Stream สำเร็จ: {self.ws_stream_endpoint}")
-            
-            # เริ่ม task สำหรับการรับข้อความจาก Stream WebSocket
-            asyncio.create_task(self._handle_stream_messages())
-            
-            self.is_running = True
-            return True
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการเชื่อมต่อกับ Binance WebSocket: {e}")
-            await self.close()
-            return False
-
-    async def _handle_api_messages(self):
-        """จัดการกับข้อความที่ได้รับจาก API WebSocket"""
-        try:
-            while self.is_running and self.api_ws:
-                try:
-                    message = await self.api_ws.recv()
-                    data = json.loads(message)
+        """Connect to WebSocket with enhanced error handling"""
+        while True:
+            try:
+                streams = [f"{symbol.lower()}@kline_1m" for symbol in self.symbols]
+                url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
+                
+                self.logger.info(f"Connecting to Binance WebSocket: {url}")
+                
+                async with websockets.connect(
+                    url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    compression=None,
+                    max_size=2**23,
+                    close_timeout=10
+                ) as websocket:
+                    self.websocket = websocket
+                    self.logger.info(f"WebSocket connected successfully")
                     
-                    # ตรวจสอบว่าเป็น ping แล้วตอบกลับด้วย pong
-                    if isinstance(data, dict) and "id" in data:
-                        request_id = data.get("id")
-                        if request_id in self.pending_requests:
-                            callback = self.pending_requests.pop(request_id)
-                            if callable(callback):
-                                await callback(data)
-                except websockets.ConnectionClosed:
-                    print("การเชื่อมต่อ API WebSocket ถูกปิด กำลังเชื่อมต่อใหม่...")
-                    await asyncio.sleep(5)  # รอก่อนเชื่อมต่อใหม่
-                    try:
-                        self.api_ws = await websockets.connect(self.ws_api_endpoint)
-                    except Exception as reconnect_error:
-                        print(f"ไม่สามารถเชื่อมต่อกับ API WebSocket ใหม่ได้: {reconnect_error}")
-                        await asyncio.sleep(10)  # รอนานขึ้นก่อนลองอีกครั้ง
-                except Exception as e:
-                    print(f"เกิดข้อผิดพลาดในการประมวลผลข้อความจาก API WebSocket: {e}")
-                    await asyncio.sleep(1)
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดใน _handle_api_messages: {e}")
-            self.is_running = False
-
-    async def _handle_stream_messages(self):
-        """จัดการกับข้อความที่ได้รับจาก Stream WebSocket"""
-        try:
-            while self.is_running and self.stream_ws:
-                try:
-                    message = await self.stream_ws.recv()
-                    data = json.loads(message)
+                    # Reset reconnection parameters
+                    self.reconnect_delay = 1.0
+                    self.reconnect_count = 0
                     
-                    # ตรวจสอบว่าเป็น stream event หรือไม่
-                    if isinstance(data, dict):
-                        if "stream" in data and "data" in data:  # Combined stream format
-                            await self._process_stream_message(data["stream"], data["data"])
-                        elif "e" in data:  # Single stream format (has event type)
-                            stream_name = data.get("s", "").lower()  # Symbol
-                            event_type = data.get("e", "")  # Event type
-                            
-                            if stream_name and event_type:
-                                stream_id = f"{stream_name}@{event_type}"
-                                await self._process_stream_message(stream_id, data)
-                except websockets.ConnectionClosed:
-                    print("การเชื่อมต่อ Stream WebSocket ถูกปิด กำลังเชื่อมต่อใหม่...")
-                    await asyncio.sleep(5)  # รอก่อนเชื่อมต่อใหม่
+                    # Start health check
+                    health_check_task = asyncio.create_task(self._health_check())
+                    
                     try:
-                        self.stream_ws = await websockets.connect(self.ws_stream_endpoint)
-                        # เมื่อเชื่อมต่อใหม่ ต้องสมัครสมาชิก stream อีกครั้ง
-                        if self.active_streams:
-                            await self._resubscribe_streams()
-                    except Exception as reconnect_error:
-                        print(f"ไม่สามารถเชื่อมต่อกับ Stream WebSocket ใหม่ได้: {reconnect_error}")
-                        await asyncio.sleep(10)  # รอนานขึ้นก่อนลองอีกครั้ง
-                except Exception as e:
-                    print(f"เกิดข้อผิดพลาดในการประมวลผลข้อความจาก Stream WebSocket: {e}")
-                    await asyncio.sleep(1)
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดใน _handle_stream_messages: {e}")
-            self.is_running = False
+                        while True:
+                            message = await websocket.recv()
+                            await self._handle_message(message)
+                    except websockets.ConnectionClosed as e:
+                        self.logger.warning(f"WebSocket connection closed: {e}")
+                        error_logger.log_error(e, {
+                            'component': 'binance_ws',
+                            'event': 'connection_closed',
+                            'reconnect_count': self.reconnect_count
+                        })
+                        health_check_task.cancel()
+                        raise
+                        
+            except Exception as e:
+                self.logger.error(f"WebSocket error: {e}")
+                error_logger.log_error(e, {
+                    'component': 'binance_ws',
+                    'event': 'connection_error',
+                    'reconnect_count': self.reconnect_count
+                })
+                
+                if self.reconnect_count >= self.max_reconnect_attempts:
+                    self.logger.error("Maximum reconnection attempts reached")
+                    break
+                    
+                await asyncio.sleep(self.reconnect_delay)
+                self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
+                self.reconnect_count += 1
+                
+                # Record metrics for reconnection
+                self.metrics.record_metric('reconnection_attempt', {
+                    'attempt_number': self.reconnect_count,
+                    'delay': self.reconnect_delay,
+                    'timestamp': datetime.now().isoformat()
+                })
 
-    async def _resubscribe_streams(self):
-        """สมัครสมาชิก stream ทั้งหมดอีกครั้งหลังจากการเชื่อมต่อใหม่"""
-        if not self.active_streams:
+    @log_execution_time()
+    async def _handle_message(self, message: str):
+        """Handle incoming messages with error tracking"""
+        try:
+            start_time = time.time()
+            
+            data = json.loads(message)
+            self.message_buffer.append(data)
+            
+            # Record message processing metrics
+            processing_time = time.time() - start_time
+            self.metrics.record_metric('message_processing', {
+                'processing_time': processing_time,
+                'buffer_size': len(self.message_buffer),
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            # Check if buffer should be flushed
+            current_time = time.time()
+            should_flush = (
+                len(self.message_buffer) >= self.buffer_size or
+                current_time - self.last_flush_time >= self.flush_interval
+            )
+            
+            if should_flush:
+                await self._flush_buffer()
+                
+        except json.JSONDecodeError as e:
+            self.logger.error(f"JSON decode error: {message[:100]}...")
+            error_logger.log_error(e, {
+                'component': 'binance_ws',
+                'event': 'message_decode_error',
+                'message_preview': message[:100]
+            })
+        except Exception as e:
+            self.logger.error(f"Message handling error: {e}")
+            error_logger.log_error(e, {
+                'component': 'binance_ws',
+                'event': 'message_handling_error'
+            })
+
+    @log_execution_time()
+    async def _flush_buffer(self):
+        """Flush message buffer with error handling"""
+        if not self.message_buffer:
             return
             
         try:
-            streams = list(self.active_streams.keys())
-            request_id = str(uuid.uuid4())
+            start_time = time.time()
             
-            subscription_message = {
-                "method": "SUBSCRIBE",
-                "params": streams,
-                "id": request_id
-            }
+            # Process messages in batch
+            kline_data = []
+            for msg in self.message_buffer:
+                if "data" in msg and "k" in msg["data"]:
+                    kline = msg["data"]["k"]
+                    kline_data.append({
+                        "symbol": kline["s"],
+                        "timestamp": kline["t"],
+                        "open": float(kline["o"]),
+                        "high": float(kline["h"]),
+                        "low": float(kline["l"]),
+                        "close": float(kline["c"]),
+                        "volume": float(kline["v"])
+                    })
             
-            await self.stream_ws.send(json.dumps(subscription_message))
-            print(f"สมัครสมาชิก stream อีกครั้ง: {streams}")
+            # Store in Redis
+            if kline_data:
+                try:
+                    self.redis_client.xadd(
+                        "market_data",
+                        {"data": json.dumps(kline_data)},
+                        maxlen=10000
+                    )
+                except redis.RedisError as e:
+                    self.logger.error(f"Redis storage error: {e}")
+                    error_logger.log_error(e, {
+                        'component': 'binance_ws',
+                        'event': 'redis_storage_error'
+                    })
+            
+            # Call callback if exists
+            if self.callback and kline_data:
+                try:
+                    await self.callback(kline_data)
+                except Exception as e:
+                    self.logger.error(f"Callback error: {e}")
+                    error_logger.log_error(e, {
+                        'component': 'binance_ws',
+                        'event': 'callback_error'
+                    })
+            
+            # Record metrics
+            processing_time = time.time() - start_time
+            self.metrics.record_metric('buffer_flush', {
+                'processing_time': processing_time,
+                'messages_processed': len(self.message_buffer),
+                'klines_processed': len(kline_data),
+                'timestamp': datetime.now().isoformat()
+            })
+            
         except Exception as e:
-            print(f"❌ เกิดข้อผิดพลาดในการสมัครสมาชิก stream อีกครั้ง: {e}")
-            # ไม่ควรล้มเหลวทั้งหมด เพราะจะทำให้ไม่ได้รับข้อมูลเลย
-            await asyncio.sleep(5)  # รอสักครู่แล้วลองอีกครั้งใน loop หลัก
+            self.logger.error(f"Buffer flush error: {e}")
+            error_logger.log_error(e, {
+                'component': 'binance_ws',
+                'event': 'buffer_flush_error',
+                'buffer_size': len(self.message_buffer)
+            })
+        finally:
+            self.message_buffer.clear()
+            self.last_flush_time = time.time()
 
-    async def _process_stream_message(self, stream_id: str, data: Dict):
-        """ประมวลผลข้อความจาก stream"""
-        # ตรวจสอบประเภทของข้อมูล
-        if "e" in data:
-            event_type = data["e"]
-            
-            # ประมวลผลตามประเภทของเหตุการณ์
-            if event_type == "kline":
-                await self.process_kline_message(data)
-            elif event_type == "aggTrade":
-                await self.process_aggtrade_message(data)
-            elif event_type == "24hrTicker":
-                await self.process_ticker_message(data)
-            elif event_type == "depthUpdate":
-                await self.process_depth_message(data)
-            else:
-                # ประเภทเหตุการณ์อื่นๆ
-                redis_channel = f"crypto_signals:{event_type}:{data.get('s', 'unknown')}"
-                self.redis_client.publish(redis_channel, json.dumps(data))
-
-    async def process_kline_message(self, message: Dict):
-        """แปลงและเผยแพร่ข้อมูล kline ไปยัง Redis และบันทึกลง InfluxDB"""
-        if message.get('e') == 'kline':
-            kline = message['k']
-            
-            # แปลงข้อมูลให้อยู่ในรูปแบบที่เหมาะสม
-            data = {
-                'symbol': message['s'],
-                'interval': kline['i'],
-                'start_time': kline['t'],
-                'close_time': kline['T'],
-                'open': float(kline['o']),
-                'high': float(kline['h']),
-                'low': float(kline['l']),
-                'close': float(kline['c']),
-                'volume': float(kline['v']),
-                'number_of_trades': kline['n'],
-                'is_closed': kline['x']  # แสดงว่า candle นี้ปิดแล้วหรือไม่
-            }
-            
-            # สร้างชื่อ channel สำหรับ symbol และ interval นี้
-            channel = f"{REDIS_CHANNEL_PREFIX}{message['s']}:{kline['i']}"
-            
-            # เผยแพร่ข้อมูลเฉพาะเมื่อ candle ปิดแล้ว
-            if data['is_closed']:
-                print(f"เผยแพร่ candle ที่ปิดแล้ว: {message['s']} {kline['i']} ที่ {datetime.fromtimestamp(kline['T']/1000)}")
-                self.redis_client.publish(channel, json.dumps(data))
-                
-                # บันทึกข้อมูล kline ลงใน InfluxDB
-                if self.influxdb_storage:
-                    try:
-                        self.influxdb_storage.store_kline_data(message['s'], data)
-                        print(f"บันทึกข้อมูล kline ลง InfluxDB สำเร็จ: {message['s']} ที่ {datetime.fromtimestamp(kline['T']/1000)}")
-                    except Exception as e:
-                        print(f"เกิดข้อผิดพลาดในการบันทึกข้อมูลลง InfluxDB: {e}")
-            
-            # เก็บ candle ล่าสุดเสมอ (ไม่ว่าจะปิดหรือไม่) ในกรณีที่ต้องการดูข้อมูลปัจจุบัน
-            self.redis_client.set(f"latest_kline:{message['s']}:{kline['i']}", json.dumps(data))
-
-    async def process_aggtrade_message(self, message: Dict):
-        """ประมวลผลข้อมูล aggregate trade"""
-        if message.get('e') == 'aggTrade':
-            # แปลงข้อมูลให้อยู่ในรูปแบบที่เหมาะสม
-            data = {
-                'symbol': message['s'],
-                'trade_id': message['a'],
-                'price': float(message['p']),
-                'quantity': float(message['q']),
-                'first_trade_id': message['f'],
-                'last_trade_id': message['l'],
-                'timestamp': message['T'],
-                'is_buyer_maker': message['m'],
-                'event_time': message['E']
-            }
-            
-            # สร้างชื่อ channel สำหรับ symbol
-            channel = f"crypto_signals:aggtrade:{message['s']}"
-            
-            # เผยแพร่ข้อมูล
-            self.redis_client.publish(channel, json.dumps(data))
-            
-            # เก็บ trade ล่าสุด
-            self.redis_client.set(f"latest_trade:{message['s']}", json.dumps(data))
-
-    async def process_ticker_message(self, message: Dict):
-        """ประมวลผลข้อมูล ticker"""
-        if message.get('e') == '24hrTicker':
-            # แปลงข้อมูลให้อยู่ในรูปแบบที่เหมาะสม
-            data = {
-                'symbol': message['s'],
-                'price_change': float(message['p']),
-                'price_change_percent': float(message['P']),
-                'weighted_avg_price': float(message['w']),
-                'last_price': float(message['c']),
-                'last_qty': float(message['Q']),
-                'open_price': float(message['o']),
-                'high_price': float(message['h']),
-                'low_price': float(message['l']),
-                'volume': float(message['v']),
-                'quote_volume': float(message['q']),
-                'event_time': message['E'],
-                'close_time': message['C']
-            }
-            
-            # สร้างชื่อ channel สำหรับ symbol
-            channel = f"crypto_signals:ticker:{message['s']}"
-            
-            # เผยแพร่ข้อมูล
-            self.redis_client.publish(channel, json.dumps(data))
-            
-            # เก็บ ticker ล่าสุด
-            self.redis_client.set(f"latest_ticker:{message['s']}", json.dumps(data))
-
-    async def process_depth_message(self, message: Dict):
-        """ประมวลผลข้อมูล order book depth"""
-        if message.get('e') == 'depthUpdate':
-            # แปลงข้อมูลให้อยู่ในรูปแบบที่เหมาะสม
-            data = {
-                'symbol': message['s'],
-                'first_update_id': message['U'],
-                'final_update_id': message['u'],
-                'bids': message['b'],
-                'asks': message['a'],
-                'event_time': message['E']
-            }
-            
-            # สร้างชื่อ channel สำหรับ symbol
-            channel = f"crypto_signals:depth:{message['s']}"
-            
-            # เผยแพร่ข้อมูล
-            self.redis_client.publish(channel, json.dumps(data))
-            
-            # เก็บ depth ล่าสุด
-            self.redis_client.set(f"latest_depth:{message['s']}", json.dumps(data))
-
-    async def subscribe_kline_stream(self, symbol: str, interval: str = '1m'):
-        """สมัครสมาชิก kline stream"""
-        stream_id = f"{symbol.lower()}@kline_{interval}"
-        
-        if stream_id in self.active_streams:
-            print(f"มีการสมัครสมาชิก {stream_id} อยู่แล้ว")
-            return True
-            
-        request_id = str(uuid.uuid4())
-        
-        subscription_message = {
-            "method": "SUBSCRIBE",
-            "params": [stream_id],
-            "id": request_id
-        }
-        
-        try:
-            await self.stream_ws.send(json.dumps(subscription_message))
-            
-            # บันทึกสถานะการสมัครสมาชิก
-            self.active_streams[stream_id] = True
-            print(f"สมัครสมาชิก {stream_id} สำเร็จ")
-            return True
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการสมัครสมาชิก {stream_id}: {e}")
-            return False
-
-    async def subscribe_aggtrade_stream(self, symbol: str):
-        """สมัครสมาชิก aggregate trade stream"""
-        stream_id = f"{symbol.lower()}@aggTrade"
-        
-        if stream_id in self.active_streams:
-            print(f"มีการสมัครสมาชิก {stream_id} อยู่แล้ว")
-            return True
-            
-        request_id = str(uuid.uuid4())
-        
-        subscription_message = {
-            "method": "SUBSCRIBE",
-            "params": [stream_id],
-            "id": request_id
-        }
-        
-        try:
-            await self.stream_ws.send(json.dumps(subscription_message))
-            
-            # บันทึกสถานะการสมัครสมาชิก
-            self.active_streams[stream_id] = True
-            print(f"สมัครสมาชิก {stream_id} สำเร็จ")
-            return True
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการสมัครสมาชิก {stream_id}: {e}")
-            return False
-
-    async def subscribe_ticker_stream(self, symbol: str):
-        """สมัครสมาชิก ticker stream"""
-        stream_id = f"{symbol.lower()}@ticker"
-        
-        if stream_id in self.active_streams:
-            print(f"มีการสมัครสมาชิก {stream_id} อยู่แล้ว")
-            return True
-            
-        request_id = str(uuid.uuid4())
-        
-        subscription_message = {
-            "method": "SUBSCRIBE",
-            "params": [stream_id],
-            "id": request_id
-        }
-        
-        try:
-            await self.stream_ws.send(json.dumps(subscription_message))
-            
-            # บันทึกสถานะการสมัครสมาชิก
-            self.active_streams[stream_id] = True
-            print(f"สมัครสมาชิก {stream_id} สำเร็จ")
-            return True
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการสมัครสมาชิก {stream_id}: {e}")
-            return False
-
-    async def subscribe_depth_stream(self, symbol: str, level: str = ''):
-        """สมัครสมาชิก order book depth stream
-        
-        level: ความละเอียดของ order book ('5', '10', '20' หรือว่างไว้เพื่อรับการอัปเดตเต็มรูปแบบ)
-        """
-        stream_id = f"{symbol.lower()}@depth{level}"
-        
-        if stream_id in self.active_streams:
-            print(f"มีการสมัครสมาชิก {stream_id} อยู่แล้ว")
-            return True
-            
-        request_id = str(uuid.uuid4())
-        
-        subscription_message = {
-            "method": "SUBSCRIBE",
-            "params": [stream_id],
-            "id": request_id
-        }
-        
-        try:
-            await self.stream_ws.send(json.dumps(subscription_message))
-            
-            # บันทึกสถานะการสมัครสมาชิก
-            self.active_streams[stream_id] = True
-            print(f"สมัครสมาชิก {stream_id} สำเร็จ")
-            return True
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการสมัครสมาชิก {stream_id}: {e}")
-            return False
-
-    async def unsubscribe_stream(self, stream_id: str):
-        """ยกเลิกการสมัครสมาชิก stream"""
-        if stream_id not in self.active_streams:
-            print(f"ไม่มีการสมัครสมาชิก {stream_id} อยู่")
-            return True
-            
-        request_id = str(uuid.uuid4())
-        
-        unsubscription_message = {
-            "method": "UNSUBSCRIBE",
-            "params": [stream_id],
-            "id": request_id
-        }
-        
-        try:
-            await self.stream_ws.send(json.dumps(unsubscription_message))
-            
-            # ลบออกจากรายการสมัครสมาชิก
-            if stream_id in self.active_streams:
-                del self.active_streams[stream_id]
-                
-            print(f"ยกเลิกการสมัครสมาชิก {stream_id} สำเร็จ")
-            return True
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการยกเลิกการสมัครสมาชิก {stream_id}: {e}")
-            return False
-
-    async def list_subscriptions(self):
-        """แสดงรายการ stream ที่สมัครสมาชิกอยู่"""
-        request_id = str(uuid.uuid4())
-        
-        message = {
-            "method": "LIST_SUBSCRIPTIONS",
-            "id": request_id
-        }
-        
-        try:
-            await self.stream_ws.send(json.dumps(message))
-            print(f"ส่งคำขอรายการสมัครสมาชิกด้วย ID: {request_id}")
-            return True
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการขอรายการสมัครสมาชิก: {e}")
-            return False
-
-    # WebSocket API methods
-    async def get_depth(self, symbol: str, limit: int = 10) -> Optional[Dict]:
-        """ขอข้อมูล order book"""
-        if not self.is_running or not self.api_ws:
-            print("ยังไม่ได้เชื่อมต่อกับ WebSocket API")
-            return None
-            
-        request_id = str(uuid.uuid4())
-        
-        message = {
-            "id": request_id,
-            "method": "depth",
-            "params": {
-                "symbol": symbol.upper(),
-                "limit": limit
-            }
-        }
-        
-        response = await self._send_api_request(message)
-        return response
-
-    async def get_recent_trades(self, symbol: str, limit: int = 10) -> Optional[Dict]:
-        """ขอข้อมูลการซื้อขายล่าสุด"""
-        if not self.is_running or not self.api_ws:
-            print("ยังไม่ได้เชื่อมต่อกับ WebSocket API")
-            return None
-            
-        request_id = str(uuid.uuid4())
-        
-        message = {
-            "id": request_id,
-            "method": "trades",
-            "params": {
-                "symbol": symbol.upper(),
-                "limit": limit
-            }
-        }
-        
-        response = await self._send_api_request(message)
-        return response
-
-    async def get_ticker(self, symbol: Optional[str] = None) -> Optional[Dict]:
-        """ขอข้อมูล ticker สำหรับหนึ่งหรือทุก symbol"""
-        if not self.is_running or not self.api_ws:
-            print("ยังไม่ได้เชื่อมต่อกับ WebSocket API")
-            return None
-            
-        request_id = str(uuid.uuid4())
-        params = {}
-        
-        if symbol:
-            params["symbol"] = symbol.upper()
-            
-        message = {
-            "id": request_id,
-            "method": "ticker.24hr",
-            "params": params
-        }
-        
-        response = await self._send_api_request(message)
-        return response
-
-    async def get_klines(self, symbol: str, interval: str = '1m', limit: int = 10) -> Optional[Dict]:
-        """ขอข้อมูล klines (candlesticks)"""
-        if not self.is_running or not self.api_ws:
-            print("ยังไม่ได้เชื่อมต่อกับ WebSocket API")
-            return None
-            
-        request_id = str(uuid.uuid4())
-        
-        message = {
-            "id": request_id,
-            "method": "klines",
-            "params": {
-                "symbol": symbol.upper(),
-                "interval": interval,
-                "limit": limit
-            }
-        }
-        
-        response = await self._send_api_request(message)
-        return response
-
-    async def _send_api_request(self, message: Dict) -> Optional[Dict]:
-        """ส่งคำขอไปยัง WebSocket API และรอผลลัพธ์"""
-        request_id = message["id"]
-        future = asyncio.get_event_loop().create_future()
-        
-        # ลงทะเบียนคอลแบ็คสำหรับคำขอนี้
-        self.pending_requests[request_id] = lambda data: future.set_result(data)
-        
-        try:
-            # ส่งคำขอผ่าน WebSocket
-            await self.api_ws.send(json.dumps(message))
-            
-            # รอผลลัพธ์ด้วยไทม์เอาต์
-            response = await asyncio.wait_for(future, timeout=10.0)
-            return response
-        except asyncio.TimeoutError:
-            print(f"คำขอ {request_id} หมดเวลา")
-            self.pending_requests.pop(request_id, None)
-            return None
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการส่งคำขอ {request_id}: {e}")
-            self.pending_requests.pop(request_id, None)
-            return None
-
-    async def start_kline_streams(self):
-        """เริ่ม streams สำหรับ kline ของทุกสัญลักษณ์"""
-        for symbol in SYMBOLS:
-            await self.subscribe_kline_stream(symbol, '2m')
-
-    async def close(self):
-        """ปิดการเชื่อมต่อทั้งหมด"""
-        self.is_running = False
-        
-        # ปิดการเชื่อมต่อ WebSocket
-        try:
-            if self.api_ws:
-                await self.api_ws.close()
-                print("ปิดการเชื่อมต่อกับ Binance WebSocket API")
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการปิดการเชื่อมต่อกับ Binance WebSocket API: {e}")
-        
-        try:
-            if self.stream_ws:
-                await self.stream_ws.close()
-                print("ปิดการเชื่อมต่อกับ Binance WebSocket Stream")
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการปิดการเชื่อมต่อกับ Binance WebSocket Stream: {e}")
-        
-        # ปิดการเชื่อมต่อกับ InfluxDB
-        if self.influxdb_storage:
+    @log_execution_time()
+    async def _health_check(self):
+        """Monitor WebSocket health"""
+        while True:
             try:
-                self.influxdb_storage.close()
-                print("ปิดการเชื่อมต่อกับ InfluxDB")
+                if self.websocket and self.websocket.open:
+                    await self.websocket.ping()
+                    self.metrics.record_metric('health_check', {
+                        'status': 'healthy',
+                        'timestamp': datetime.now().isoformat()
+                    })
+                else:
+                    self.logger.warning("WebSocket connection unhealthy")
+                    self.metrics.record_metric('health_check', {
+                        'status': 'unhealthy',
+                        'timestamp': datetime.now().isoformat()
+                    })
+                await asyncio.sleep(30)
             except Exception as e:
-                print(f"เกิดข้อผิดพลาดในการปิดการเชื่อมต่อกับ InfluxDB: {e}")
+                self.logger.error(f"Health check error: {e}")
+                error_logger.log_error(e, {
+                    'component': 'binance_ws',
+                    'event': 'health_check_error'
+                })
+                break
+                
+    async def close(self):
+        """Close connections and cleanup resources"""
+        try:
+            self.logger.info("Closing WebSocket connection...")
+            
+            if self.websocket:
+                await self.websocket.close()
+            
+            # Record final metrics
+            self.metrics.record_metric('shutdown', {
+                'total_reconnections': self.reconnect_count,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            if hasattr(self, 'processor'):
+                self.processor.cleanup()
+                
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}")
+            error_logger.log_error(e, {
+                'component': 'binance_ws',
+                'event': 'cleanup_error'
+            })
+        finally:            try:
+                await self.redis_client.close()
+            except Exception as e:
+                self.logger.error(f"Error closing Redis connection: {e}")
+                
+    @log_execution_time()
+    async def start_kline_streams(self):
+        """
+        เริ่มต้นการสมัครสมาชิก Binance WebSocket streams ทั้งหมดที่จำเป็น
+        - kline streams สำหรับการวิเคราะห์ราคา
+        - depth streams สำหรับข้อมูล orderbook
+        - trades streams สำหรับข้อมูลการซื้อขายล่าสุด
+        """
+        self.logger.info("Starting Binance WebSocket streams...")
+        
+        # เริ่มการเชื่อมต่อใหม่ถ้ายังไม่ได้เชื่อมต่อ
+        if not hasattr(self, 'websocket') or not self.websocket or not self.websocket.open:
+            await self.connect()
+            
+        try:
+            # เริ่ม depth และ trades streams สำหรับแต่ละสัญลักษณ์
+            for symbol in self.symbols:
+                # เริ่ม depth stream
+                asyncio.create_task(self.start_depth_stream(symbol))
+                self.logger.info(f"Started depth stream for {symbol}")
+                
+                # เริ่ม trades stream
+                asyncio.create_task(self.start_trades_stream(symbol))
+                self.logger.info(f"Started trades stream for {symbol}")
+                
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to start streams: {e}")
+            error_logger.log_error(e, {
+                'component': 'binance_ws',
+                'event': 'start_streams_error'
+            })
+            return False
+            
+    @log_execution_time()
+    async def start_depth_stream(self, symbol: str):
+        """
+        เริ่มต้นการสมัครสมาชิก depth stream สำหรับสัญลักษณ์ที่ระบุ
+        
+        Args:
+            symbol: สัญลักษณ์คริปโตที่ต้องการข้อมูล depth
+        """
+        stream_name = f"{symbol.lower()}@depth20@100ms"
+        url = f"wss://stream.binance.com:9443/ws/{stream_name}"
+        
+        self.logger.info(f"Connecting to depth stream: {url}")
+        
+        reconnect_delay = 1.0
+        max_reconnect_delay = 60.0
+        reconnect_count = 0
+        
+        while True:
+            try:
+                async with websockets.connect(url, ping_interval=30) as ws:
+                    self.logger.info(f"Connected to depth stream for {symbol}")
+                    
+                    # รีเซ็ตค่าสำหรับการเชื่อมต่อใหม่
+                    reconnect_delay = 1.0
+                    reconnect_count = 0
+                    
+                    while True:
+                        try:
+                            message = await asyncio.wait_for(ws.recv(), timeout=60)
+                            
+                            # แปลงข้อความเป็น JSON และประมวลผล
+                            data = json.loads(message)
+                            
+                            # เก็บข้อมูลล่าสุดใน Redis
+                            redis_key = f"latest_depth:{symbol}"
+                            self.redis_client.set(redis_key, message, ex=60)  # หมดอายุใน 60 วินาที
+                            
+                            # เผยแพร่ข้อมูลไปยัง channel
+                            redis_channel = f"crypto_signals:depth:{symbol}"
+                            self.redis_client.publish(redis_channel, message)
+                            
+                        except asyncio.TimeoutError:
+                            # ส่ง ping เพื่อตรวจสอบการเชื่อมต่อ
+                            try:
+                                pong = await ws.ping()
+                                await asyncio.wait_for(pong, timeout=10)
+                            except Exception:
+                                # การเชื่อมต่อมีปัญหา เชื่อมต่อใหม่
+                                raise ConnectionError("Ping failed")
+                                
+                        except json.JSONDecodeError as e:
+                            self.logger.error(f"JSON decode error in depth stream: {message[:100]}...")
+                            error_logger.log_error(e, {
+                                'component': 'binance_ws',
+                                'event': 'depth_decode_error',
+                                'symbol': symbol
+                            })
+                            
+                        except Exception as e:
+                            self.logger.error(f"Error processing depth message: {e}")
+                            error_logger.log_error(e, {
+                                'component': 'binance_ws',
+                                'event': 'depth_processing_error',
+                                'symbol': symbol
+                            })
+                            # หากเป็นข้อผิดพลาดการเชื่อมต่อ ให้เชื่อมต่อใหม่
+                            if "connection" in str(e).lower() or "socket" in str(e).lower():
+                                raise ConnectionError(str(e))
+                            
+            except (websockets.exceptions.ConnectionClosed, ConnectionError) as e:
+                if reconnect_count >= 10:
+                    self.logger.error(f"Maximum reconnection attempts reached for depth stream {symbol}")
+                    break
+                
+                self.logger.warning(f"Depth stream for {symbol} disconnected: {e}. Reconnecting in {reconnect_delay}s...")
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                reconnect_count += 1
+                
+            except Exception as e:
+                self.logger.error(f"Unexpected error in depth stream for {symbol}: {e}")
+                error_logger.log_error(e, {
+                    'component': 'binance_ws',
+                    'event': 'depth_stream_error',
+                    'symbol': symbol
+                })
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                reconnect_count += 1
+
+    @log_execution_time()
+    async def start_trades_stream(self, symbol: str):
+        """
+        เริ่มต้นการสมัครสมาชิก trades stream สำหรับสัญลักษณ์ที่ระบุ
+        
+        Args:
+            symbol: สัญลักษณ์คริปโตที่ต้องการข้อมูลการซื้อขาย
+        """
+        stream_name = f"{symbol.lower()}@trade"
+        url = f"wss://stream.binance.com:9443/ws/{stream_name}"
+        
+        self.logger.info(f"Connecting to trades stream: {url}")
+        
+        reconnect_delay = 1.0
+        max_reconnect_delay = 60.0
+        reconnect_count = 0
+        
+        while True:
+            try:
+                async with websockets.connect(url, ping_interval=30) as ws:
+                    self.logger.info(f"Connected to trades stream for {symbol}")
+                    
+                    # รีเซ็ตค่าสำหรับการเชื่อมต่อใหม่
+                    reconnect_delay = 1.0
+                    reconnect_count = 0
+                    
+                    while True:
+                        try:
+                            message = await asyncio.wait_for(ws.recv(), timeout=60)
+                            
+                            # แปลงข้อความเป็น JSON และประมวลผล
+                            data = json.loads(message)
+                            
+                            # เก็บข้อมูลล่าสุดใน Redis (เฉพาะรายการซื้อขายล่าสุด 100 รายการ)
+                            redis_key = f"latest_trades:{symbol}"
+                            trade_list_key = f"trades_list:{symbol}"
+                            
+                            # เก็บข้อมูลซื้อขายล่าสุดใน Redis
+                            self.redis_client.set(redis_key, message, ex=60)  # หมดอายุใน 60 วินาที
+                            
+                            # เก็บรายการซื้อขายล่าสุด 100 รายการใน Redis List
+                            self.redis_client.lpush(trade_list_key, message)
+                            self.redis_client.ltrim(trade_list_key, 0, 99)  # เก็บเฉพาะ 100 รายการล่าสุด
+                            
+                            # เผยแพร่ข้อมูลไปยัง channel
+                            redis_channel = f"crypto_signals:trades:{symbol}"
+                            self.redis_client.publish(redis_channel, message)
+                            
+                        except asyncio.TimeoutError:
+                            # ส่ง ping เพื่อตรวจสอบการเชื่อมต่อ
+                            try:
+                                pong = await ws.ping()
+                                await asyncio.wait_for(pong, timeout=10)
+                            except Exception:
+                                # การเชื่อมต่อมีปัญหา เชื่อมต่อใหม่
+                                raise ConnectionError("Ping failed")
+                                
+                        except json.JSONDecodeError as e:
+                            self.logger.error(f"JSON decode error in trades stream: {message[:100]}...")
+                            error_logger.log_error(e, {
+                                'component': 'binance_ws',
+                                'event': 'trades_decode_error',
+                                'symbol': symbol
+                            })
+                            
+                        except Exception as e:
+                            self.logger.error(f"Error processing trades message: {e}")
+                            error_logger.log_error(e, {
+                                'component': 'binance_ws',
+                                'event': 'trades_processing_error',
+                                'symbol': symbol
+                            })
+                            # หากเป็นข้อผิดพลาดการเชื่อมต่อ ให้เชื่อมต่อใหม่
+                            if "connection" in str(e).lower() or "socket" in str(e).lower():
+                                raise ConnectionError(str(e))
+                            
+            except (websockets.exceptions.ConnectionClosed, ConnectionError) as e:
+                if reconnect_count >= 10:
+                    self.logger.error(f"Maximum reconnection attempts reached for trades stream {symbol}")
+                    break
+                
+                self.logger.warning(f"Trades stream for {symbol} disconnected: {e}. Reconnecting in {reconnect_delay}s...")
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                reconnect_count += 1
+                
+            except Exception as e:
+                self.logger.error(f"Unexpected error in trades stream for {symbol}: {e}")
+                error_logger.log_error(e, {
+                    'component': 'binance_ws',
+                    'event': 'trades_stream_error',
+                    'symbol': symbol
+                })
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                reconnect_count += 1
 
 async def main():
     """ฟังก์ชันหลักสำหรับเริ่มต้นโปรแกรม"""
-    client = BinanceWebSocketClient()
+    client = BinanceWebSocketClient(SYMBOLS)
     
     try:
-        is_connected = await client.connect()
-        if is_connected and client.is_running:
-            # เริ่ม kline streams
-            await client.start_kline_streams()
-            
-            # ทดสอบ API requests
-            symbol = "BTCUSDT"
-            print(f"ขอข้อมูลราคาล่าสุดของ {symbol}...")
-            ticker_data = await client.get_ticker(symbol)
-            if ticker_data:
-                print(f"ข้อมูล ticker: {json.dumps(ticker_data, indent=2)}")
-            
-            # รอไว้เพื่อให้โปรแกรมทำงานต่อไป
-            while client.is_running:
-                await asyncio.sleep(60)
-                print("โปรแกรมยังทำงานอยู่...")
-                
+        await client.connect()
     except asyncio.CancelledError:
         print("ยกเลิกการทำงานของโปรแกรม")
     except Exception as e:
